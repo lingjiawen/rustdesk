@@ -6,6 +6,9 @@ import 'package:auto_size_text/auto_size_text.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/server_profiles.dart';
+import 'package:flutter_hbb/common/widgets/login.dart';
+import 'package:flutter_hbb/common/widgets/peer_tab_page.dart';
 import 'package:flutter_hbb/common/widgets/animated_rotation_widget.dart';
 import 'package:flutter_hbb/common/widgets/custom_password.dart';
 import 'package:flutter_hbb/consts.dart';
@@ -13,6 +16,7 @@ import 'package:flutter_hbb/desktop/pages/connection_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_setting_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/desktop/widgets/update_progress.dart';
+import 'package:flutter_hbb/models/peer_tab_model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
@@ -34,6 +38,9 @@ class DesktopHomePage extends StatefulWidget {
 
 const borderColor = Color(0xFF2F65BA);
 
+/// -1 is the home page. Other values are [PeerTabIndex] indexes.
+final RxInt _homeSection = (-1).obs;
+
 class _DesktopHomePageState extends State<DesktopHomePage>
     with AutomaticKeepAliveClientMixin, WidgetsBindingObserver {
   final _leftPaneScrollController = ScrollController();
@@ -49,6 +56,10 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   var watchIsCanRecordAudio = false;
   Timer? _updateTimer;
   bool isCardClosed = false;
+  bool _macPermReady = false;
+  bool _macScreen = false;
+  bool _macAccess = false;
+  bool _macInput = false;
 
   final RxBool _editHover = false.obs;
   final RxBool _block = false.obs;
@@ -59,15 +70,64 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   Widget build(BuildContext context) {
     super.build(context);
     final isIncomingOnly = bind.isIncomingOnly();
+    if (isIncomingOnly) {
+      return _buildBlock(
+          child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          buildLeftPane(context),
+        ],
+      ));
+    }
     return _buildBlock(
         child: Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        buildLeftPane(context),
-        if (!isIncomingOnly) const VerticalDivider(width: 1),
-        if (!isIncomingOnly) Expanded(child: buildRightPane(context)),
+        const HomePeerTabRail(),
+        const VerticalDivider(width: 1),
+        Expanded(child: _buildMainPane(context)),
       ],
     ));
+  }
+
+  Widget _buildMainPane(BuildContext context) {
+    final isOutgoingOnly = bind.isOutgoingOnly();
+    // Both panes stay mounted: ConnectionPage keeps its GetX controllers and
+    // the peer views keep their state when the rail switches sections.
+    return Container(
+      color: Theme.of(context).scaffoldBackgroundColor,
+      child: Obx(() => IndexedStack(
+          index: _homeSection.value < 0 ? 0 : 1,
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (!isOutgoingOnly) buildPresetPasswordWarning(),
+                Obx(() => buildHelpCards(stateGlobal.updateUrl.value)),
+                if (!isOutgoingOnly) _buildHomeIdCard(context),
+                const Expanded(
+                  child: ConnectionPage(
+                    showConnectControls: true,
+                    showPeerList: false,
+                  ),
+                ),
+              ],
+            ),
+            Column(
+              children: [
+                const Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.only(left: 12.0),
+                    child: PeerTabPage(showTabBar: false),
+                  ),
+                ),
+                if (!isOutgoingOnly) const Divider(height: 1),
+                if (!isOutgoingOnly) OnlineStatusWidget(),
+              ],
+            ),
+          ],
+        )),
+    );
   }
 
   Widget _buildBlock({required Widget child}) {
@@ -178,13 +238,6 @@ class _DesktopHomePageState extends State<DesktopHomePage>
     );
   }
 
-  buildRightPane(BuildContext context) {
-    return Container(
-      color: Theme.of(context).scaffoldBackgroundColor,
-      child: ConnectionPage(),
-    );
-  }
-
   buildIDBoard(BuildContext context) {
     final model = gFFI.serverModel;
     return Container(
@@ -249,6 +302,138 @@ class _DesktopHomePageState extends State<DesktopHomePage>
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// ID and one-time password for the home page main pane: one bordered card
+  /// with two columns of the same structure, aligned with the connect card.
+  Widget _buildHomeIdCard(BuildContext context) {
+    final textColor = Theme.of(context).textTheme.titleLarge?.color;
+    final labelStyle =
+        TextStyle(fontSize: 13, color: textColor?.withOpacity(0.55));
+    final iconColor = textColor?.withOpacity(0.55);
+
+    Widget action(IconData icon, String tooltip, VoidCallback onTap) {
+      return IconButton(
+        icon: Icon(icon, size: 18),
+        color: iconColor,
+        tooltip: translate(tooltip),
+        splashRadius: 16,
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints.tightFor(width: 30, height: 30),
+        onPressed: onTap,
+      );
+    }
+
+    void copy(String text) {
+      Clipboard.setData(ClipboardData(text: text));
+      showToast(translate("Copied"));
+    }
+
+    Widget column(String label, Widget value, List<Widget> actions) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(translate(label),
+              style: labelStyle, maxLines: 1, overflow: TextOverflow.ellipsis),
+          const SizedBox(height: 6),
+          SizedBox(
+            height: 34,
+            child: Row(
+              children: [
+                Expanded(child: value),
+                ...actions,
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+
+    Widget valueText(TextEditingController controller, double fontSize,
+        {bool copyable = true}) {
+      return ValueListenableBuilder<TextEditingValue>(
+        valueListenable: controller,
+        builder: (context, v, _) => GestureDetector(
+          onDoubleTap: copyable ? () => copy(v.text) : null,
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              v.text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontSize: fontSize,
+                  fontWeight: FontWeight.w600,
+                  color: textColor),
+            ),
+          ),
+        ),
+      );
+    }
+
+    final model = gFFI.serverModel;
+    final idColumn = column("ID", valueText(model.serverId, 24), [
+      action(Icons.copy_rounded, 'Copy to clipboard', () => copy(model.serverId.text)),
+      action(Icons.more_vert_outlined, 'Settings',
+          DesktopTabPage.onAddSetting),
+    ]);
+    final passwordColumn = ChangeNotifierProvider.value(
+      value: gFFI.serverModel,
+      child: Consumer<ServerModel>(builder: (context, model, child) {
+        final showOneTime = model.approveMode != 'click' &&
+            model.verificationMethod != kUsePermanentPassword;
+        return column(
+          "One-time Password",
+          valueText(model.serverPasswd, 20, copyable: showOneTime),
+          [
+            if (showOneTime)
+              action(Icons.copy_rounded, 'Copy to clipboard',
+                  () => copy(model.serverPasswd.text)),
+            if (showOneTime)
+              AnimatedRotationWidget(
+                onPressed: () => bind.mainUpdateTemporaryPassword(),
+                child: Tooltip(
+                  message: translate('Refresh Password'),
+                  child: SizedBox(
+                    width: 30,
+                    height: 30,
+                    child: RotatedBox(
+                        quarterTurns: 2,
+                        child: Icon(Icons.refresh, size: 18, color: iconColor)),
+                  ),
+                ),
+              ),
+            if (!bind.isDisableSettings())
+              action(Icons.edit_outlined, 'Change Password',
+                  () => DesktopSettingPage.switch2page(SettingsTabKey.safety)),
+          ],
+        );
+      }),
+    );
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+      padding: const EdgeInsets.fromLTRB(20, 14, 12, 12),
+      decoration: BoxDecoration(
+        borderRadius: const BorderRadius.all(Radius.circular(13)),
+        border: Border.all(color: Theme.of(context).colorScheme.background),
+      ),
+      child: IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(child: idColumn),
+            VerticalDivider(
+              width: 33,
+              thickness: 1,
+              color: Theme.of(context).colorScheme.background,
+            ),
+            Expanded(child: passwordColumn),
+          ],
+        ),
       ),
     );
   }
@@ -427,6 +612,133 @@ class _DesktopHomePageState extends State<DesktopHomePage>
     );
   }
 
+  bool _readMacPermissions() {
+    final outgoing = bind.isOutgoingOnly();
+    final screen =
+        outgoing || bind.mainIsCanScreenRecording(prompt: false);
+    final access = outgoing || bind.mainIsProcessTrusted(prompt: false);
+    final input = bind.mainIsCanInputMonitoring(prompt: false);
+    final changed = !_macPermReady ||
+        screen != _macScreen ||
+        access != _macAccess ||
+        input != _macInput;
+    _macScreen = screen;
+    _macAccess = access;
+    _macInput = input;
+    _macPermReady = true;
+    return changed;
+  }
+
+  void _refreshMacPermissions() {
+    if (_readMacPermissions() && mounted) setState(() {});
+  }
+
+  void _openMacPrivacy(String pane) {
+    launchUrl(Uri.parse(
+        'x-apple.systempreferences:com.apple.preference.security?$pane'));
+  }
+
+  Widget _buildMacPermissionBoard() {
+    if (!_macPermReady) _readMacPermissions();
+    final outgoing = bind.isOutgoingOnly();
+    final items = <_MacPerm>[
+      if (!outgoing)
+        _MacPerm(
+          '屏幕录制',
+          _macScreen,
+          () {
+            bind.mainIsCanScreenRecording(prompt: true);
+            _openMacPrivacy('Privacy_ScreenCapture');
+            watchIsCanScreenRecording = true;
+          },
+        ),
+      if (!outgoing)
+        _MacPerm(
+          '辅助功能',
+          _macAccess,
+          () {
+            bind.mainIsProcessTrusted(prompt: true);
+            _openMacPrivacy('Privacy_Accessibility');
+            watchIsProcessTrust = true;
+          },
+        ),
+      _MacPerm(
+        '输入监控',
+        _macInput,
+        () {
+          bind.mainIsCanInputMonitoring(prompt: true);
+          _openMacPrivacy('Privacy_ListenEvent');
+          watchIsInputMonitoring = true;
+        },
+      ),
+    ];
+    if (items.every((item) => item.granted)) {
+      return const SizedBox.shrink();
+    }
+    final textColor = Theme.of(context).textTheme.titleLarge?.color;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+      padding: const EdgeInsets.fromLTRB(14, 12, 8, 8),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+            color: Theme.of(context).dividerColor.withOpacity(0.4)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(translate('Permissions'),
+                  style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: textColor)),
+              const Spacer(),
+              TextButton(
+                onPressed: () =>
+                    launchUrl(Uri.parse(translate('doc_mac_permission'))),
+                child: Text(translate('Help')),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          for (final item in items)
+            Row(
+              children: [
+                Icon(
+                  item.granted ? Icons.check_circle : Icons.cancel,
+                  size: 18,
+                  color: item.granted
+                      ? const Color(0xFF2EAE6A)
+                      : const Color(0xFFE04F5F),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(item.name,
+                      style: TextStyle(fontSize: 13, color: textColor)),
+                ),
+                if (!item.granted)
+                  TextButton(
+                    onPressed: item.onGuide,
+                    child: const Text('去设置'),
+                  ),
+              ],
+            ),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Text(
+              '没打勾的点「去设置」。授权后重新打开本应用才会生效。',
+              style: TextStyle(
+                  fontSize: 12, color: textColor?.withOpacity(0.55)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget buildHelpCards(String updateUrl) {
     if (!bind.isCustomClient() &&
         updateUrl.isNotEmpty &&
@@ -475,30 +787,11 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         });
       }
     } else if (isMacOS) {
-      final isOutgoingOnly = bind.isOutgoingOnly();
-      if (!(isOutgoingOnly || bind.mainIsCanScreenRecording(prompt: false))) {
-        return buildInstallCard("Permissions", "config_screen", "Configure",
-            () async {
-          bind.mainIsCanScreenRecording(prompt: true);
-          // macOS shows the request prompt only once per app, so later
-          // presses would do nothing without opening the settings pane.
-          launchUrl(Uri.parse(
-              'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'));
-          watchIsCanScreenRecording = true;
-        }, help: 'Help', link: translate("doc_mac_permission"));
-      } else if (!isOutgoingOnly && !bind.mainIsProcessTrusted(prompt: false)) {
-        return buildInstallCard("Permissions", "config_acc", "Configure",
-            () async {
-          bind.mainIsProcessTrusted(prompt: true);
-          watchIsProcessTrust = true;
-        }, help: 'Help', link: translate("doc_mac_permission"));
-      } else if (!bind.mainIsCanInputMonitoring(prompt: false)) {
-        return buildInstallCard("Permissions", "config_input", "Configure",
-            () async {
-          bind.mainIsCanInputMonitoring(prompt: true);
-          watchIsInputMonitoring = true;
-        }, help: 'Help', link: translate("doc_mac_permission"));
-      } else if (!isOutgoingOnly &&
+      if (!_macPermReady) _readMacPermissions();
+      if (_macScreen &&
+          _macAccess &&
+          _macInput &&
+          !bind.isOutgoingOnly() &&
           !svcStopped.value &&
           bind.mainIsInstalled() &&
           !bind.mainIsInstalledDaemon(prompt: false)) {
@@ -506,6 +799,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           bind.mainIsInstalledDaemon(prompt: true);
         });
       }
+      return _buildMacPermissionBoard();
       //// Disable microphone configuration for macOS. We will request the permission when needed.
       // else if ((await osxCanRecordAudio() !=
       //     PermissionAuthorizeType.authorized)) {
@@ -712,6 +1006,9 @@ class _DesktopHomePageState extends State<DesktopHomePage>
       if (v != svcStopped.value) {
         svcStopped.value = v;
         setState(() {});
+      }
+      if (isMacOS) {
+        _refreshMacPermissions();
       }
       if (watchIsCanScreenRecording) {
         if (bind.mainIsCanScreenRecording(prompt: false)) {
@@ -1126,4 +1423,201 @@ void setPasswordDialog({VoidCallback? notEmptyCallback}) async {
       onCancel: close,
     );
   });
+}
+
+class HomePeerTabRail extends StatelessWidget {
+  const HomePeerTabRail({Key? key}) : super(key: key);
+
+  Future<void> _select(int tabIndex) async {
+    _homeSection.value = tabIndex;
+    if (isOptionFixed(kOptionPeerTabIndex)) {
+      return;
+    }
+    final model = gFFI.peerTabModel;
+    if (tabIndex != model.currentTab) {
+      model.setCurrentTabCachedPeers([]);
+    }
+    model.setCurrentTab(tabIndex);
+    if (tabIndex == PeerTabIndex.ab.index) {
+      await gFFI.abModel.pullAb(force: null, quiet: false);
+    } else if (tabIndex == PeerTabIndex.group.index) {
+      await gFFI.groupModel.pull(force: false);
+    }
+    await bind.setLocalFlutterOption(
+        k: kOptionPeerTabIndex, v: tabIndex.toString());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final model = Provider.of<PeerTabModel>(context);
+    final textColor = Theme.of(context).textTheme.titleLarge?.color;
+    return Container(
+      width: 196,
+      color: Theme.of(context).colorScheme.background,
+      child: Column(
+        children: [
+          const _AccountHeader(),
+          Expanded(
+            child: Obx(() => ListView(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  children: [
+                    _RailItem(
+                      icon: Icons.home_outlined,
+                      label: translate('Home'),
+                      selected: _homeSection.value < 0,
+                      onTap: () => _homeSection.value = -1,
+                    ),
+                    for (final tabIndex in model.visibleEnabledOrderedIndexs)
+                      _RailItem(
+                        icon: model.tabIcon(tabIndex),
+                        label: model.tabTooltip(tabIndex),
+                        selected: _homeSection.value == tabIndex,
+                        onTap: () => _select(tabIndex),
+                      ),
+                  ],
+                )),
+          ),
+          InkWell(
+            onTap: () {
+              if (DesktopSettingPage.tabKeys.isNotEmpty) {
+                DesktopSettingPage.switch2page(DesktopSettingPage.tabKeys[0]);
+              }
+            },
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
+              child: Row(
+                children: [
+                  Icon(Icons.settings_outlined,
+                      size: 18, color: textColor?.withOpacity(0.7)),
+                  const SizedBox(width: 10),
+                  Text(
+                    translate('Settings'),
+                    style: TextStyle(
+                        fontSize: 13, color: textColor?.withOpacity(0.8)),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RailItem extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _RailItem({
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final textColor = Theme.of(context).textTheme.titleLarge?.color;
+    final color = selected ? MyTheme.accent : textColor?.withOpacity(0.75);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Material(
+        color: selected
+            ? MyTheme.accent.withOpacity(0.12)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+            child: Row(
+              children: [
+                Icon(icon, size: 18, color: color),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight:
+                          selected ? FontWeight.w600 : FontWeight.w400,
+                      color: color,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AccountHeader extends StatelessWidget {
+  const _AccountHeader();
+
+  @override
+  Widget build(BuildContext context) {
+    final textColor = Theme.of(context).textTheme.titleLarge?.color;
+    return Obx(() {
+      final loggedIn = gFFI.userModel.isLogin;
+      final label = ServerProfiles.headerLabel();
+      final avatarUrl = gFFI.userModel.avatar.value.trim();
+      return InkWell(
+        onTap: () => loggedIn ? showAccountSwitchDialog() : loginDialog(),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 14, 12, 8),
+          child: Row(
+            children: [
+              _avatar(avatarUrl, textColor),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: loggedIn ? textColor : textColor?.withOpacity(0.55),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    });
+  }
+
+  Widget _avatar(String url, Color? color) {
+    if (url.startsWith('http')) {
+      return CircleAvatar(
+        radius: 14,
+        backgroundColor: color?.withOpacity(0.08),
+        backgroundImage: ResizeImage(NetworkImage(url), width: 56),
+        onBackgroundImageError: (_, __) {},
+      );
+    }
+    return Icon(
+      Icons.account_circle,
+      size: 32,
+      color: color?.withOpacity(0.75),
+    );
+  }
+}
+
+class _MacPerm {
+  final String name;
+  final bool granted;
+  final VoidCallback onGuide;
+  const _MacPerm(this.name, this.granted, this.onGuide);
 }

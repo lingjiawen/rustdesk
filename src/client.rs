@@ -476,10 +476,14 @@ impl Client {
             crate::get_rendezvous_server(1_000).await
         } else {
             if other_server == PUBLIC_SERVER {
+                let Some(first) = RENDEZVOUS_SERVERS.first() else {
+                    bail!("No public ID server is configured");
+                };
                 (
-                    check_port(RENDEZVOUS_SERVERS[0], RENDEZVOUS_PORT),
-                    RENDEZVOUS_SERVERS[1..]
+                    check_port(*first, RENDEZVOUS_PORT),
+                    RENDEZVOUS_SERVERS
                         .iter()
+                        .skip(1)
                         .map(|x| x.to_string())
                         .collect(),
                     true,
@@ -2715,7 +2719,9 @@ impl VideoHandler {
                         } else {
                             self.fail_counter += 1;
                         }
-                        log::error!(
+                        hbb_common::throttled_log!(
+                            std::time::Duration::from_secs(1),
+                            error,
                             "Failed to handle video frame, fail counter: {}",
                             self.fail_counter
                         );
@@ -4093,7 +4099,12 @@ pub fn start_video_thread<F, T>(
                                     // 3. If the error does not occur. Switch from A to display B. The error occurs.
                                     //
                                     // to-do: fix the error
-                                    log::error!("handle video frame error, {}", e);
+                                    hbb_common::throttled_log!(
+                                        std::time::Duration::from_secs(1),
+                                        error,
+                                        "handle video frame error, {}",
+                                        e
+                                    );
                                     session.refresh_video(display as _);
                                 }
                                 _ => {}

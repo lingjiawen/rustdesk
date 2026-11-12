@@ -236,11 +236,11 @@ class ColorThemeExtension extends ThemeExtension<ColorThemeExtension> {
       highlight: Color.lerp(highlight, other.highlight, t),
       drag_indicator: Color.lerp(drag_indicator, other.drag_indicator, t),
       shadow: Color.lerp(shadow, other.shadow, t),
-      errorBannerBg: Color.lerp(shadow, other.errorBannerBg, t),
-      me: Color.lerp(shadow, other.me, t),
-      toastBg: Color.lerp(shadow, other.toastBg, t),
-      toastText: Color.lerp(shadow, other.toastText, t),
-      divider: Color.lerp(shadow, other.divider, t),
+      errorBannerBg: Color.lerp(errorBannerBg, other.errorBannerBg, t),
+      me: Color.lerp(me, other.me, t),
+      toastBg: Color.lerp(toastBg, other.toastBg, t),
+      toastText: Color.lerp(toastText, other.toastText, t),
+      divider: Color.lerp(divider, other.divider, t),
     );
   }
 }
@@ -379,7 +379,8 @@ class MyTheme {
     appBarTheme: AppBarTheme(
       shadowColor: Colors.transparent,
     ),
-    dialogTheme: DialogTheme(
+    dialogTheme: DialogThemeData(
+      backgroundColor: Colors.white,
       elevation: 15,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(18.0),
@@ -410,7 +411,7 @@ class MyTheme {
     cardColor: grayBg,
     hintColor: Color(0xFFAAAAAA),
     visualDensity: VisualDensity.adaptivePlatformDensity,
-    tabBarTheme: const TabBarTheme(
+    tabBarTheme: const TabBarThemeData(
       labelColor: Colors.black87,
     ),
     tooltipTheme: tooltipTheme(),
@@ -477,7 +478,8 @@ class MyTheme {
     appBarTheme: AppBarTheme(
       shadowColor: Colors.transparent,
     ),
-    dialogTheme: DialogTheme(
+    dialogTheme: DialogThemeData(
+      backgroundColor: Color(0xFF18191E),
       elevation: 15,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(18.0),
@@ -511,7 +513,7 @@ class MyTheme {
     ),
     cardColor: Color(0xFF24252B),
     visualDensity: VisualDensity.adaptivePlatformDensity,
-    tabBarTheme: const TabBarTheme(
+    tabBarTheme: const TabBarThemeData(
       labelColor: Colors.white70,
     ),
     tooltipTheme: tooltipTheme(),
@@ -3677,7 +3679,7 @@ Future<bool> setServerConfig(
   if (oldApiServer.isNotEmpty &&
       oldApiServer != newApiServer &&
       gFFI.userModel.isLogin) {
-    gFFI.userModel.logOut(apiServer: oldApiServer);
+    await gFFI.userModel.logOut(apiServer: oldApiServer);
   }
   return true;
 }

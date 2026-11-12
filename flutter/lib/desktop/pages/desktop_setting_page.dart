@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/server_profiles.dart';
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/consts.dart';
@@ -593,13 +594,6 @@ class _GeneralState extends State<_General> {
             ),
           ),
       ],
-      if (!isWeb && !bind.isCustomClient())
-        _OptionCheckBox(
-          context,
-          'Check for software update on startup',
-          kOptionEnableCheckUpdate,
-          isServer: false,
-        ),
       if (showAutoUpdate)
         _OptionCheckBox(
           context,
@@ -2294,11 +2288,11 @@ class _AccountState extends State<_Account> {
     return Obx(() => _Button(
         gFFI.userModel.userName.value.isEmpty
             ? 'Login'
-            : '${translate('Logout')} (${gFFI.userModel.accountLabelWithHandle})',
+            : ServerProfiles.headerLabel(),
         () => {
               gFFI.userModel.userName.value.isEmpty
                   ? loginDialog()
-                  : logOutConfirmDialog()
+                  : showAccountSwitchDialog()
             }));
   }
 
@@ -2333,7 +2327,7 @@ class _AccountState extends State<_Account> {
                         const SizedBox(height: 2),
                         SelectionArea(
                           child: Text(
-                            '@${gFFI.userModel.userName.value}',
+                            ServerProfiles.headerLabel(),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(

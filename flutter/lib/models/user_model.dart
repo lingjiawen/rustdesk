@@ -15,6 +15,10 @@ import 'platform_model.dart';
 bool refreshingUser = false;
 
 class UserModel {
+  /// Runs after local login state is cleared. Used to drop the saved
+  /// session of the active named server.
+  static Future<void> Function()? onLocalReset;
+
   final RxString userName = ''.obs;
   final RxString displayName = ''.obs;
   final RxString avatar = ''.obs;
@@ -83,6 +87,9 @@ class UserModel {
       refreshingUser = false;
       final status = response.statusCode;
       if (status == 401 || status == 400) {
+        if (status == 401) {
+          await onLocalReset?.call();
+        }
         reset(resetOther: status == 401);
         return;
       }
@@ -145,6 +152,10 @@ class UserModel {
     userName.value = '';
     displayName.value = '';
     avatar.value = '';
+  }
+
+  void applyLocalUserInfo() {
+    _updateLocalUserInfo();
   }
 
   _parseAndUpdateUser(UserPayload user) {

@@ -7,6 +7,7 @@ import 'package:flutter_hbb/common/widgets/toolbar.dart';
 import 'package:get/get.dart';
 
 import '../../common.dart';
+import '../../common/server_profiles.dart';
 import '../../models/platform_model.dart';
 
 void _showSuccess() {
@@ -54,34 +55,47 @@ void setTemporaryPasswordLengthDialog(
   }, backDismiss: true, clickMaskDismiss: true);
 }
 
-void showServerSettings(OverlayDialogManager dialogManager,
-    void Function(VoidCallback) setState) async {
+Future<bool> showServerSettings(OverlayDialogManager dialogManager,
+    void Function(VoidCallback) setState,
+    {bool blank = false}) async {
+  await ServerProfiles.load();
+  if (blank) {
+    return showServerSettingsWithValue(
+        ServerConfig(), dialogManager, setState,
+        blank: true);
+  }
   Map<String, dynamic> options = {};
   try {
     options = jsonDecode(await bind.mainGetOptions());
   } catch (e) {
     print("Invalid server config: $e");
   }
-  showServerSettingsWithValue(
+  return showServerSettingsWithValue(
       ServerConfig.fromOptions(options), dialogManager, setState);
 }
 
-void showServerSettingsWithValue(
+Future<bool> showServerSettingsWithValue(
     ServerConfig serverConfig,
     OverlayDialogManager dialogManager,
-    void Function(VoidCallback)? upSetState) async {
+    void Function(VoidCallback)? upSetState,
+    {bool blank = false}) async {
   const labelWidth = 120.0;
   const labelSpacing = 8.0;
   var isInProgress = false;
-  final idCtrl = TextEditingController(text: serverConfig.idServer);
-  final relayCtrl = TextEditingController(text: serverConfig.relayServer);
-  final apiCtrl = TextEditingController(text: serverConfig.apiServer);
-  final keyCtrl = TextEditingController(text: serverConfig.key);
+  final idCtrl =
+      TextEditingController(text: blank ? '' : serverConfig.idServer);
+  final relayCtrl =
+      TextEditingController(text: blank ? '' : serverConfig.relayServer);
+  final apiCtrl =
+      TextEditingController(text: blank ? '' : serverConfig.apiServer);
+  final keyCtrl = TextEditingController(text: blank ? '' : serverConfig.key);
 
   RxString idServerMsg = ''.obs;
   RxString relayServerMsg = ''.obs;
   RxString apiServerMsg = ''.obs;
 
+  final nameCtrl = TextEditingController(
+      text: blank ? '' : ServerProfiles.activeName.value);
   final controllers = [idCtrl, relayCtrl, apiCtrl, keyCtrl];
   final errMsgs = [
     idServerMsg,
@@ -89,7 +103,7 @@ void showServerSettingsWithValue(
     apiServerMsg,
   ];
 
-  dialogManager.show((setState, close, context) {
+  final res = await dialogManager.show<bool>((setState, close, context) {
     Future<bool> submit() async {
       setState(() {
         isInProgress = true;
@@ -143,21 +157,131 @@ void showServerSettingsWithValue(
       ).workaroundFreezeLinuxMint();
     }
 
+    Future<bool> saveCurrent() async {
+      final name = nameCtrl.text.trim();
+      final nameErr = ServerProfiles.validateName(name);
+      if (nameErr != null) {
+        showToast(nameErr);
+        return false;
+      }
+      if (!await submit()) {
+        showToast(translate('Failed'));
+        return false;
+      }
+      final err = await ServerProfiles.upsert(ServerProfile(
+        name: name,
+        idServer: idCtrl.text.trim(),
+        relayServer: relayCtrl.text.trim(),
+        apiServer: apiCtrl.text.trim(),
+        key: keyCtrl.text.trim(),
+      ));
+      if (err != null) {
+        showToast(err);
+        return false;
+      }
+      return true;
+    }
+
+    void clearForm() {
+      nameCtrl.clear();
+      idCtrl.clear();
+      relayCtrl.clear();
+      apiCtrl.clear();
+      keyCtrl.clear();
+      setState(() {});
+    }
+
     return CustomAlertDialog(
       title: Row(
         children: [
           Expanded(child: Text(translate('ID/Relay Server'))),
+          TextButton.icon(
+            onPressed: () async {
+              final name = nameCtrl.text.trim();
+              final hasBody = idCtrl.text.trim().isNotEmpty ||
+                  relayCtrl.text.trim().isNotEmpty ||
+                  apiCtrl.text.trim().isNotEmpty ||
+                  keyCtrl.text.trim().isNotEmpty;
+              if (name.isEmpty && hasBody) {
+                showToast('请填写名称');
+                return;
+              }
+              if (name.isNotEmpty) {
+                if (!await saveCurrent()) return;
+                showToast('已保存 $name');
+              }
+              clearForm();
+            },
+            icon: const Icon(Icons.add, size: 18),
+            label: const Text('新增'),
+          ),
           ...ServerConfigImportExportWidgets(controllers, errMsgs),
         ],
       ),
       content: ConstrainedBox(
         constraints: const BoxConstraints(minWidth: 500),
         child: Form(
-          child: Obx(() => Column(
+              child: Obx(() => Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  buildField(translate('ID Server'), idCtrl, idServerMsg.value,
-                      autofocus: true),
+                  buildField('名称', nameCtrl, ''),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Padding(
+                      padding: EdgeInsets.only(
+                        left: isDesktop || isWeb
+                            ? labelWidth + labelSpacing
+                            : 0,
+                        bottom: 8,
+                      ),
+                      child: Text(
+                        '点右上角「新增」再加一台。名称用来区分，例如 auth',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: Theme.of(context).hintColor),
+                      ),
+                    ),
+                  ),
+                  if (ServerProfiles.profiles.isNotEmpty)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Padding(
+                        padding: EdgeInsets.only(
+                          left: isDesktop || isWeb
+                              ? labelWidth + labelSpacing
+                              : 0,
+                          bottom: 8,
+                        ),
+                        child: Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          children: [
+                            for (final profile in ServerProfiles.profiles)
+                              InputChip(
+                                label: Text(profile.name),
+                                selected: profile.name == nameCtrl.text.trim(),
+                                onPressed: () async {
+                                  nameCtrl.text = profile.name;
+                                  idCtrl.text = profile.idServer;
+                                  relayCtrl.text = profile.relayServer;
+                                  apiCtrl.text = profile.apiServer;
+                                  keyCtrl.text = profile.key;
+                                  setState(() {});
+                                  await ServerProfiles.switchTo(profile.name);
+                                },
+                                onDeleted: () async {
+                                  await ServerProfiles.remove(profile.name);
+                                  if (nameCtrl.text.trim() == profile.name) {
+                                    nameCtrl.text = ServerProfiles.activeName.value;
+                                  }
+                                  setState(() {});
+                                },
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  buildField(translate('ID Server'), idCtrl, idServerMsg.value),
                   SizedBox(height: 8),
                   if (!isIOS && !isWeb) ...[
                     buildField(translate('Relay Server'), relayCtrl,
@@ -202,23 +326,22 @@ void showServerSettingsWithValue(
       ),
       actions: [
         dialogButton('Cancel', onPressed: () {
-          close();
+          close(false);
         }, isOutline: true),
         dialogButton(
           'OK',
           onPressed: () async {
-            if (await submit()) {
-              close();
+            if (await saveCurrent()) {
+              close(true);
               showToast(translate('Successful'));
               upSetState?.call(() {});
-            } else {
-              showToast(translate('Failed'));
             }
           },
         ),
       ],
     );
   });
+  return res == true;
 }
 
 TextFormField serverSettingsTextFormField({

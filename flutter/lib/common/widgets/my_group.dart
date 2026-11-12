@@ -242,24 +242,28 @@ class _MyGroupState extends State<MyGroup> {
                     ),
                   ),
                 ).marginOnly(right: 4),
-                if (isMe) Flexible(child: Text(displayName)),
                 if (isMe)
                   Flexible(
-                    child: Container(
-                      margin: EdgeInsets.only(left: 5),
-                      padding: EdgeInsets.symmetric(horizontal: 3, vertical: 1),
-                      decoration: BoxDecoration(
-                          color: colorMe.withAlpha(20),
-                          borderRadius: BorderRadius.all(Radius.circular(2)),
-                          border: Border.all(color: colorMe.withAlpha(100))),
-                      child: Text(
-                        translate('Me'),
-                        style: TextStyle(
-                            color: colorMe.withAlpha(200), fontSize: 12),
-                      ),
+                      child: Text(displayName,
+                          maxLines: 1, overflow: TextOverflow.ellipsis)),
+                if (isMe)
+                  Container(
+                    margin: EdgeInsets.only(left: 5),
+                    padding: EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                    decoration: BoxDecoration(
+                        color: colorMe.withAlpha(20),
+                        borderRadius: BorderRadius.all(Radius.circular(2)),
+                        border: Border.all(color: colorMe.withAlpha(100))),
+                    child: Text(
+                      translate('Me'),
+                      style: TextStyle(
+                          color: colorMe.withAlpha(200), fontSize: 12),
                     ),
                   ),
-                if (!isMe) Expanded(child: Text(displayName)),
+                if (!isMe)
+                  Expanded(
+                      child: Text(displayName,
+                          maxLines: 1, overflow: TextOverflow.ellipsis)),
               ],
             ).paddingSymmetric(vertical: 4),
           ),

@@ -11,6 +11,8 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../common.dart';
+import '../server_profiles.dart';
+import '../../mobile/widgets/dialog.dart' as server_dialog;
 import './dialog.dart';
 import './oidc_auth_status.dart';
 
@@ -720,6 +722,20 @@ Future<bool?> _openLoginDialogOnce() async {
 }
 
 Future<bool?> _openLoginDialog() async {
+  await ServerProfiles.load();
+  if (ServerProfiles.profiles.isEmpty) {
+    final saved = await server_dialog.showServerSettings(
+        gFFI.dialogManager, (_) {},
+        blank: true);
+    await ServerProfiles.load();
+    if (!saved || ServerProfiles.profiles.isEmpty) {
+      return false;
+    }
+  }
+  var selectedServer = ServerProfiles.activeName.value.trim();
+  if (ServerProfiles.find(selectedServer) == null) {
+    selectedServer = '';
+  }
   var username =
       TextEditingController(text: UserModel.getLocalUserInfo()?['name'] ?? '');
   var password = TextEditingController();
@@ -969,11 +985,37 @@ Future<bool?> _openLoginDialog() async {
       title: title,
       titlePadding: titlePadding,
       contentBoxConstraints: BoxConstraints(minWidth: 400),
-      content: Column(
+        content: Column(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           const SizedBox(
             height: 8.0,
+          ),
+          _RelayServerField(
+            selected: selectedServer,
+            onPick: (name) async {
+              final restored = await ServerProfiles.switchTo(name);
+              if (restored) {
+                close(true);
+                return;
+              }
+              setState(() => selectedServer = name);
+            },
+            onAdd: () async {
+              final saved = await server_dialog.showServerSettings(
+                  gFFI.dialogManager, (_) {},
+                  blank: true);
+              await ServerProfiles.load();
+              if (!saved) return;
+              final name = ServerProfiles.activeName.value.trim();
+              if (name.isEmpty) return;
+              final restored = await ServerProfiles.switchTo(name);
+              if (restored) {
+                close(true);
+                return;
+              }
+              setState(() => selectedServer = name);
+            },
           ),
           LoginWidgetUserPass(
             username: username,
@@ -993,6 +1035,7 @@ Future<bool?> _openLoginDialog() async {
     );
   }).whenComplete(oidcAuth.close);
 
+  await ServerProfiles.capture();
   if (res != null) {
     await UserModel.updateOtherModels();
   }
@@ -1111,10 +1154,156 @@ Future<bool?> verificationCodeDialog(
   return res;
 }
 
+class _RelayServerField extends StatefulWidget {
+  final String selected;
+  final Future<void> Function(String name) onPick;
+  final Future<void> Function() onAdd;
+
+  const _RelayServerField({
+    required this.selected,
+    required this.onPick,
+    required this.onAdd,
+  });
+
+  @override
+  State<_RelayServerField> createState() => _RelayServerFieldState();
+}
+
+class _RelayServerFieldState extends State<_RelayServerField> {
+  bool _open = false;
+  late final TextEditingController _text;
+
+  @override
+  void initState() {
+    super.initState();
+    _text = TextEditingController(text: widget.selected);
+  }
+
+  @override
+  void didUpdateWidget(covariant _RelayServerField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.selected != _text.text) {
+      _text.text = widget.selected;
+    }
+  }
+
+  @override
+  void dispose() {
+    _text.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final names = ServerProfiles.profiles.map((e) => e.name).toList();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        children: [
+          TextField(
+            controller: _text,
+            readOnly: true,
+            onTap: () => setState(() => _open = !_open),
+            decoration: InputDecoration(
+              labelText: '中继服务器',
+              prefixIcon: const Icon(Icons.dns_outlined),
+              suffixIcon:
+                  Icon(_open ? Icons.arrow_drop_up : Icons.arrow_drop_down),
+            ),
+          ).workaroundFreezeLinuxMint(),
+          if (_open)
+            for (final name in names)
+              ListTile(
+                dense: true,
+                visualDensity: VisualDensity.compact,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                selected: name == widget.selected,
+                title: Text(name),
+                onTap: () async {
+                  setState(() => _open = false);
+                  await widget.onPick(name);
+                },
+              ),
+          if (_open)
+            ListTile(
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+              leading: const Icon(Icons.add),
+              title: const Text('新增'),
+              onTap: () async {
+                setState(() => _open = false);
+                await widget.onAdd();
+              },
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+void showAccountSwitchDialog() {
+  gFFI.dialogManager.show((setState, close, context) {
+    final names = ServerProfiles.profiles.map((e) => e.name).toList();
+    return CustomAlertDialog(
+      title: const Text('账户'),
+      content: SizedBox(
+        width: 360,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(ServerProfiles.headerLabel()),
+            const SizedBox(height: 8),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 280),
+              child: SingleChildScrollView(
+                child: Column(
+                  children: [
+                    for (final name in names)
+                      ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(ServerProfiles.labelFor(name)),
+                        trailing: name == ServerProfiles.activeName.value
+                            ? const Text('当前')
+                            : TextButton(
+                                onPressed: () async {
+                                  close();
+                                  final restored =
+                                      await ServerProfiles.switchTo(name);
+                                  if (!restored) loginDialog();
+                                },
+                                child: const Text('切换'),
+                              ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        dialogButton('切换账号', onPressed: () async {
+          close();
+          await ServerProfiles.reloginHere();
+          loginDialog();
+        }, isOutline: true),
+        dialogButton('退出登录', onPressed: () {
+          close();
+          logOutConfirmDialog();
+        }),
+      ],
+    );
+  });
+}
+
 void logOutConfirmDialog() {
   gFFI.dialogManager.show((setState, close, context) {
     submit() {
       close();
+      UserModel.onLocalReset?.call();
       gFFI.userModel.logOut();
     }
 

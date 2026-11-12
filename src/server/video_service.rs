@@ -177,14 +177,23 @@ struct VideoFrameController {
     display_idx: usize,
     cur: Instant,
     send_conn_ids: HashSet<i32>,
+    // `try_wait_next` runs several times per frame; building a runtime each
+    // time costs a kqueue fd and allocations, so keep one for the loop.
+    rt: Option<tokio::runtime::Runtime>,
 }
 
 impl VideoFrameController {
     fn new(display_idx: usize) -> Self {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .map_err(|e| log::error!("Failed to build frame wait runtime: {e}"))
+            .ok();
         Self {
             display_idx,
             cur: Instant::now(),
             send_conn_ids: HashSet::new(),
+            rt,
         }
     }
 
@@ -203,8 +212,7 @@ impl VideoFrameController {
         }
     }
 
-    #[tokio::main(flavor = "current_thread")]
-    async fn try_wait_next(&mut self, fetched_conn_ids: &mut HashSet<i32>, timeout_millis: u64) {
+    fn try_wait_next(&mut self, fetched_conn_ids: &mut HashSet<i32>, timeout_millis: u64) {
         if self.send_conn_ids.is_empty() {
             return;
         }
@@ -222,30 +230,36 @@ impl VideoFrameController {
                 }
             }
         };
-        let mut receiver_guard = receiver.lock().await;
-        match tokio::time::timeout(timeout_dur, receiver_guard.recv()).await {
-            Err(_) => {
-                // break if timeout
-                // log::error!("blocking wait frame receiving timeout {}", timeout_millis);
-            }
-            Ok(Some((id, instant))) => {
-                if let Some(tm) = instant {
-                    log::trace!("Channel recv latency: {}", tm.elapsed().as_secs_f32());
+        let Some(rt) = self.rt.as_ref() else {
+            std::thread::sleep(timeout_dur);
+            return;
+        };
+        rt.block_on(async move {
+            let mut receiver_guard = receiver.lock().await;
+            match tokio::time::timeout(timeout_dur, receiver_guard.recv()).await {
+                Err(_) => {
+                    // break if timeout
+                    // log::error!("blocking wait frame receiving timeout {}", timeout_millis);
                 }
-                fetched_conn_ids.insert(id);
-            }
-            Ok(None) => {
-                // this branch would never be reached
-            }
-        }
-        while !receiver_guard.is_empty() {
-            if let Some((id, instant)) = receiver_guard.recv().await {
-                if let Some(tm) = instant {
-                    log::trace!("Channel recv latency: {}", tm.elapsed().as_secs_f32());
+                Ok(Some((id, instant))) => {
+                    if let Some(tm) = instant {
+                        log::trace!("Channel recv latency: {}", tm.elapsed().as_secs_f32());
+                    }
+                    fetched_conn_ids.insert(id);
                 }
-                fetched_conn_ids.insert(id);
+                Ok(None) => {
+                    // this branch would never be reached
+                }
             }
-        }
+            while !receiver_guard.is_empty() {
+                if let Some((id, instant)) = receiver_guard.recv().await {
+                    if let Some(tm) = instant {
+                        log::trace!("Channel recv latency: {}", tm.elapsed().as_secs_f32());
+                    }
+                    fetched_conn_ids.insert(id);
+                }
+            }
+        });
     }
 }
 
@@ -1318,8 +1332,13 @@ fn handle_one_frame(
             vpx_no_output = e.is::<scrap::VpxNoOutput>();
             *encode_fail_counter += 1;
             // Encoding errors are not frequent except on Android
-            if !cfg!(target_os = "android") {
-                log::error!("encode fail: {e:?}, times: {}", *encode_fail_counter,);
+            if !cfg!(target_os = "android") && !vpx_no_output {
+                hbb_common::throttled_log!(
+                    Duration::from_secs(1),
+                    error,
+                    "encode fail: {e:?}, times: {}",
+                    *encode_fail_counter
+                );
             }
             let max_fail_times = if cfg!(target_os = "android") && encoder.is_hardware() {
                 9

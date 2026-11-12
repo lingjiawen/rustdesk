@@ -24,6 +24,7 @@ import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'common.dart';
+import 'common/server_profiles.dart';
 import 'consts.dart';
 import 'mobile/pages/home_page.dart';
 import 'mobile/pages/server_page.dart';
@@ -139,7 +140,11 @@ void runMainApp(bool startService) async {
   if (startService) {
     gFFI.serverModel.startService();
   }
-  await Future.wait([gFFI.abModel.loadCache(), gFFI.groupModel.loadCache()]);
+  await Future.wait([
+    gFFI.abModel.loadCache(),
+    gFFI.groupModel.loadCache(),
+    ServerProfiles.load(),
+  ]);
   gFFI.userModel.refreshCurrentUser();
   runApp(App());
 
@@ -179,7 +184,11 @@ void runMobileApp() async {
   if (isAndroid) androidChannelInit();
   if (isAndroid) platformFFI.syncAndroidServiceAppDirConfigPath();
   draggablePositions.load();
-  await Future.wait([gFFI.abModel.loadCache(), gFFI.groupModel.loadCache()]);
+  await Future.wait([
+    gFFI.abModel.loadCache(),
+    gFFI.groupModel.loadCache(),
+    ServerProfiles.load(),
+  ]);
   gFFI.userModel.refreshCurrentUser();
   runApp(App());
   await initUniLinks();

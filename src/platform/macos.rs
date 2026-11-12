@@ -160,6 +160,8 @@ fn unsafe_is_can_screen_recording(prompt: bool) -> bool {
     // we got some report that we show no permission even after set it, so we try to use new api for screen recording check
     // the new api is only available on macOS >= 10.15, but on stackoverflow, some people said it works on >= 10.16 (crash on 10.15),
     // but also some said it has bug on 10.16, so we just use it on 11.0.
+    // The window-name scan below must not override it: menu bar items expose
+    // their names without the permission, so it reports granted when it is not.
     unsafe {
         if CanUseNewApiForScreenCaptureCheck() == YES {
             return IsCanScreenRecording(if prompt { YES } else { NO }) == YES;
@@ -206,6 +208,7 @@ fn unsafe_is_can_screen_recording(prompt: bool) -> bool {
             can_record_screen = true;
             break;
         }
+        CFRelease(window_list as _);
     }
     if !can_record_screen && prompt {
         use scrap::{Capturer, Display};

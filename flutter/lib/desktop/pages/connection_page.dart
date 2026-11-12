@@ -17,6 +17,7 @@ import 'package:flutter_hbb/models/peer_model.dart';
 import '../../common.dart';
 import '../../common/formatter/id_formatter.dart';
 import '../../common/widgets/peer_tab_page.dart';
+import '../../common/widgets/peers_view.dart';
 import '../../common/widgets/autocomplete.dart';
 import '../../models/platform_model.dart';
 import '../../desktop/widgets/material_mod_popup_menu.dart' as mod_menu;
@@ -189,7 +190,13 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
 
 /// Connection page for connecting to a remote peer.
 class ConnectionPage extends StatefulWidget {
-  const ConnectionPage({Key? key}) : super(key: key);
+  final bool showConnectControls;
+  final bool showPeerList;
+  const ConnectionPage({
+    Key? key,
+    this.showConnectControls = true,
+    this.showPeerList = true,
+  }) : super(key: key);
 
   @override
   State<ConnectionPage> createState() => _ConnectionPageState();
@@ -215,6 +222,13 @@ class _ConnectionPageState extends State<ConnectionPage>
   Iterable<Peer> _autocompleteOpts = [];
 
   final _menuOpen = false.obs;
+
+  // Built once: its build() asks Rust to reload the recent peers, and that
+  // reload notifies `_allPeersLoader`, which calls setState here. A fresh
+  // instance per build would loop.
+  late final Widget _homeRecentPeers = HomeRecentPeersView(
+    menuPadding: isDesktop ? kDesktopMenuPadding : null,
+  );
 
   @override
   void initState() {
@@ -304,19 +318,37 @@ class _ConnectionPageState extends State<ConnectionPage>
   @override
   Widget build(BuildContext context) {
     final isOutgoingOnly = bind.isOutgoingOnly();
+    final showConnect = widget.showConnectControls;
+    final showPeers = widget.showPeerList;
     return Column(
       children: [
         Expanded(
             child: Column(
           children: [
-            Row(
-              children: [
-                Flexible(child: _buildRemoteIDTextField(context)),
-              ],
-            ).marginOnly(top: 22),
-            SizedBox(height: 12),
-            Divider().paddingOnly(right: 12),
-            Expanded(child: PeerTabPage()),
+            if (showConnect)
+              Row(
+                children: [
+                  Flexible(child: _buildRemoteIDTextField(context)),
+                ],
+              ).marginOnly(top: 22, right: showPeers ? 0 : 12),
+            if (showConnect && showPeers) ...[
+              SizedBox(height: 12),
+              Divider().paddingOnly(right: 12),
+            ],
+            if (showPeers) Expanded(child: PeerTabPage()),
+            if (!showPeers) ...[
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  translate('Recent sessions'),
+                  style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: Theme.of(context).textTheme.titleLarge?.color),
+                ),
+              ).marginOnly(top: 20, bottom: 10, left: 4),
+              Expanded(child: _homeRecentPeers),
+            ],
           ],
         ).paddingOnly(left: 12.0)),
         if (!isOutgoingOnly) const Divider(height: 1),
@@ -377,7 +409,7 @@ class _ConnectionPageState extends State<ConnectionPage>
   /// Search for a peer.
   Widget _buildRemoteIDTextField(BuildContext context) {
     var w = Container(
-      width: 320 + 20 * 2,
+      width: widget.showPeerList ? 320 + 20 * 2 : double.infinity,
       padding: const EdgeInsets.fromLTRB(20, 24, 20, 22),
       decoration: BoxDecoration(
           borderRadius: const BorderRadius.all(Radius.circular(13)),
@@ -659,6 +691,8 @@ class _ConnectionPageState extends State<ConnectionPage>
       ),
     );
     return Container(
-        constraints: const BoxConstraints(maxWidth: 600), child: w);
+        constraints: BoxConstraints(
+            maxWidth: widget.showPeerList ? 600 : double.infinity),
+        child: w);
   }
 }

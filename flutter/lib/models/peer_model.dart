@@ -218,27 +218,21 @@ class Peers extends ChangeNotifier {
 
   void _updateOnlineState(Map<String, dynamic> evt) {
     int changedCount = 0;
-    evt['onlines'].split(',').forEach((online) {
-      for (var i = 0; i < peers.length; i++) {
-        if (peers[i].id == online) {
-          if (!peers[i].online) {
-            changedCount += 1;
-            peers[i].online = true;
-          }
+    final Set<String> onlines = evt['onlines'].split(',').toSet();
+    final Set<String> offlines = evt['offlines'].split(',').toSet();
+    for (final peer in peers) {
+      if (offlines.contains(peer.id)) {
+        if (peer.online) {
+          changedCount += 1;
+          peer.online = false;
+        }
+      } else if (onlines.contains(peer.id)) {
+        if (!peer.online) {
+          changedCount += 1;
+          peer.online = true;
         }
       }
-    });
-
-    evt['offlines'].split(',').forEach((offline) {
-      for (var i = 0; i < peers.length; i++) {
-        if (peers[i].id == offline) {
-          if (peers[i].online) {
-            changedCount += 1;
-            peers[i].online = false;
-          }
-        }
-      }
-    });
+    }
 
     if (changedCount > 0) {
       event = UpdateEvent.online;

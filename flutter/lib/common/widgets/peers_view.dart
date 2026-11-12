@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
 
-import 'package:dynamic_layouts/dynamic_layouts.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/consts.dart';
@@ -72,12 +71,16 @@ class _PeersView extends StatefulWidget {
   final PeerFilter? peerFilter;
   final PeerCardBuilder peerCardBuilder;
   final PeerTabIndex peerTabIndex;
+  // A view shown outside the peer tabs (the home page). It must not feed the
+  // current tab's selection cache or follow the tab search box.
+  final bool standalone;
 
   const _PeersView(
       {required this.peers,
       required this.peerCardBuilder,
       required this.peerTabIndex,
       this.peerFilter,
+      this.standalone = false,
       Key? key})
       : super(key: key);
 
@@ -186,7 +189,9 @@ class _PeersViewState extends State<_PeersView>
       value: widget.peers,
       child: Consumer<Peers>(builder: (context, peers, child) {
         if (peers.peers.isEmpty) {
-          gFFI.peerTabModel.setCurrentTabCachedPeers([]);
+          if (!widget.standalone) {
+            gFFI.peerTabModel.setCurrentTabCachedPeers([]);
+          }
           return Center(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -225,8 +230,10 @@ class _PeersViewState extends State<_PeersView>
     _lastChangeTime = DateTime.now();
   }
 
-  String _cardId(String id) => widget.peers.name + id;
-  String _peerId(String cardId) => cardId.replaceAll(widget.peers.name, '');
+  String get _cardPrefix =>
+      widget.standalone ? 'home_${widget.peers.name}' : widget.peers.name;
+  String _cardId(String id) => _cardPrefix + id;
+  String _peerId(String cardId) => cardId.replaceAll(_cardPrefix, '');
 
   Widget _buildPeersView(Peers peers) {
     final updateEvent = peers.event;
@@ -236,7 +243,9 @@ class _PeersViewState extends State<_PeersView>
           if (snapshot.hasData) {
             var peers = snapshot.data!;
             if (peers.length > 1000) peers = peers.sublist(0, 1000);
-            gFFI.peerTabModel.setCurrentTabCachedPeers(peers);
+            if (!widget.standalone) {
+              gFFI.peerTabModel.setCurrentTabCachedPeers(peers);
+            }
             buildOnePeer(Peer peer, bool isPortrait) {
               final visibilityChild = VisibilityDetector(
                 key: ValueKey(_cardId(peer.id)),
@@ -282,14 +291,29 @@ class _PeersViewState extends State<_PeersView>
                               bottom: space / 2);
                         },
                       )
-                    : DynamicGridView.builder(
-                        gridDelegate: SliverGridDelegateWithWrapping(
-                            mainAxisSpacing: space / 2,
-                            crossAxisSpacing: space),
-                        itemCount: peers.length,
-                        itemBuilder: (BuildContext context, int index) {
-                          return buildOnePeer(peers[index], false);
-                        }));
+                    // Columns adapt to the available width and cards stretch
+                    // to fill it, so no dead strip is left beside the grid.
+                    : LayoutBuilder(builder: (context, constraints) {
+                        const minCardWidth = 180.0;
+                        final width = constraints.maxWidth - space;
+                        final count =
+                            ((width + space) / (minCardWidth + space)).floor();
+                        return GridView.builder(
+                            padding: EdgeInsets.only(right: space),
+                            gridDelegate:
+                                SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: count < 1 ? 1 : count,
+                                    mainAxisExtent:
+                                        peerCardUiType.value == PeerUiType.grid
+                                            ? 140
+                                            : 42,
+                                    mainAxisSpacing: space,
+                                    crossAxisSpacing: space),
+                            itemCount: peers.length,
+                            itemBuilder: (BuildContext context, int index) {
+                              return buildOnePeer(peers[index], false);
+                            });
+                      }));
 
             if (updateEvent == UpdateEvent.load) {
               _curPeers.clear();
@@ -303,7 +327,8 @@ class _PeersViewState extends State<_PeersView>
             );
           }
         },
-        future: matchPeers(filters[0].value, filters[1].value, peers.peers),
+        future: matchPeers(widget.standalone ? '' : filters[0].value,
+            filters[1].value, peers.peers),
       );
     }, obslist);
 
@@ -387,7 +412,7 @@ class _PeersViewState extends State<_PeersView>
               p1.username.toLowerCase().compareTo(p2.username.toLowerCase()));
           break;
         case PeerSortType.status:
-          peers.sort((p1, p2) => p1.online ? -1 : 1);
+          peers.sort((p1, p2) => (p2.online ? 1 : 0) - (p1.online ? 1 : 0));
           break;
       }
     }
@@ -414,12 +439,14 @@ abstract class BasePeersView extends StatelessWidget {
   final PeerTabIndex peerTabIndex;
   final PeerFilter? peerFilter;
   final PeerCardBuilder peerCardBuilder;
+  final bool standalone;
 
   const BasePeersView({
     Key? key,
     required this.peerTabIndex,
     this.peerFilter,
     required this.peerCardBuilder,
+    this.standalone = false,
   }) : super(key: key);
 
   @override
@@ -446,7 +473,8 @@ abstract class BasePeersView extends StatelessWidget {
         peers: peers,
         peerFilter: peerFilter,
         peerCardBuilder: peerCardBuilder,
-        peerTabIndex: peerTabIndex);
+        peerTabIndex: peerTabIndex,
+        standalone: standalone);
   }
 }
 
@@ -456,6 +484,27 @@ class RecentPeersView extends BasePeersView {
       : super(
           key: key,
           peerTabIndex: PeerTabIndex.recent,
+          peerCardBuilder: (Peer peer) => RecentPeerCard(
+            peer: peer,
+            menuPadding: menuPadding,
+          ),
+        );
+
+  @override
+  Widget build(BuildContext context) {
+    final widget = super.build(context);
+    bind.mainLoadRecentPeers();
+    return widget;
+  }
+}
+
+/// Recent sessions shown on the desktop home page, independent of the tabs.
+class HomeRecentPeersView extends BasePeersView {
+  HomeRecentPeersView({Key? key, EdgeInsets? menuPadding})
+      : super(
+          key: key,
+          peerTabIndex: PeerTabIndex.recent,
+          standalone: true,
           peerCardBuilder: (Peer peer) => RecentPeerCard(
             peer: peer,
             menuPadding: menuPadding,

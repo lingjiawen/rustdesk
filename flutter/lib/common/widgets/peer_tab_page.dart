@@ -27,7 +27,8 @@ import '../../common.dart';
 import '../../models/platform_model.dart';
 
 class PeerTabPage extends StatefulWidget {
-  const PeerTabPage({Key? key}) : super(key: key);
+  final bool showTabBar;
+  const PeerTabPage({Key? key, this.showTabBar = true}) : super(key: key);
   @override
   State<PeerTabPage> createState() => _PeerTabPageState();
 }
@@ -119,9 +120,12 @@ class _PeerTabPageState extends State<PeerTabPage>
                 child: selectionWrap(Row(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    Expanded(
-                        child: visibleContextMenuListener(
-                            _createSwitchBar(context))),
+                    if (widget.showTabBar)
+                      Expanded(
+                          child: visibleContextMenuListener(
+                              _createSwitchBar(context)))
+                    else
+                      const Spacer(),
                     if (stateGlobal.isPortrait.isTrue)
                       ..._portraitRightActions(context)
                     else

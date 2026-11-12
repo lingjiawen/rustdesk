@@ -492,7 +492,9 @@ impl VideoRenderer {
         }
 
         if info.size.0 != rgba.w || info.size.1 != rgba.h {
-            log::error!(
+            hbb_common::throttled_log!(
+                std::time::Duration::from_secs(1),
+                error,
                 "width/height mismatch: ({},{}) != ({},{})",
                 info.size.0,
                 info.size.1,
