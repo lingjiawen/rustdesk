@@ -60,6 +60,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   bool _macScreen = false;
   bool _macAccess = false;
   bool _macInput = false;
+  bool _macDisk = false;
 
   final RxBool _editHover = false.obs;
   final RxBool _block = false.obs;
@@ -618,15 +619,35 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         outgoing || bind.mainIsCanScreenRecording(prompt: false);
     final access = outgoing || bind.mainIsProcessTrusted(prompt: false);
     final input = bind.mainIsCanInputMonitoring(prompt: false);
+    final disk = outgoing || _macHasFullDiskAccess();
     final changed = !_macPermReady ||
         screen != _macScreen ||
         access != _macAccess ||
-        input != _macInput;
+        input != _macInput ||
+        disk != _macDisk;
     _macScreen = screen;
     _macAccess = access;
     _macInput = input;
+    _macDisk = disk;
     _macPermReady = true;
     return changed;
+  }
+
+  // Full Disk Access has no query API. The per-user TCC database can be opened only
+  // with it, and a failed open does not raise a prompt. Without it, a peer browsing
+  // Desktop, Documents or Downloads leaves a consent prompt on this screen and waits.
+  bool _macHasFullDiskAccess() {
+    final home = Platform.environment['HOME'];
+    if (home == null || home.isEmpty) return true;
+    try {
+      File('$home/Library/Application Support/com.apple.TCC/TCC.db')
+          .openSync()
+          .closeSync();
+      return true;
+    } on FileSystemException catch (e) {
+      // EPERM is the denial; any other error means the probe itself is unusable.
+      return e.osError?.errorCode != 1;
+    }
   }
 
   void _refreshMacPermissions() {
@@ -671,6 +692,12 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           watchIsInputMonitoring = true;
         },
       ),
+      if (!outgoing)
+        _MacPerm(
+          '完全磁盘访问（文件传输）',
+          _macDisk,
+          () => _openMacPrivacy('Privacy_AllFiles'),
+        ),
     ];
     if (items.every((item) => item.granted)) {
       return const SizedBox.shrink();

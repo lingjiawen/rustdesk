@@ -365,6 +365,9 @@ class FileController {
   var sortAscending = true;
   // Incremented for each navigation; only the latest generation applies results.
   int _directoryRequestGeneration = 0;
+  // True while a remote listing is on its way, so the pane shows progress instead of
+  // looking frozen.
+  final isLoading = false.obs;
   final JobController jobController;
   final WeakReference<FFI> rootState;
 
@@ -533,6 +536,7 @@ class FileController {
       }
     }
     final requestGeneration = ++_directoryRequestGeneration;
+    if (!isLocal) isLoading.value = true;
     try {
       final fd = await fileFetcher.fetchDirectory(path, isLocal, showHidden);
       if (requestGeneration != _directoryRequestGeneration) {
@@ -550,8 +554,28 @@ class FileController {
       if (isAndroid && isLocal && AndroidDocuments.isPath(path)) {
         showToast(e.toString());
       }
+      if (!isLocal) _reportRemoteReadFailure(e);
       return false;
+    } finally {
+      if (!isLocal && requestGeneration == _directoryRequestGeneration) {
+        isLoading.value = false;
+      }
     }
+  }
+
+  // A failed remote listing used to be silent, which looked like a frozen pane.
+  void _reportRemoteReadFailure(Object error) {
+    final text = error.toString();
+    if (text.contains(_kRemoteSessionChangedError)) return;
+    final timedOut = text.contains('timeout') || text.contains('Timed out');
+    final reason = timedOut ? '被控端没有及时返回' : text;
+    final isMacPeer =
+        rootState.target?.ffiModel.pi.platform == kPeerPlatformMacOS;
+    final hint = isMacPeer
+        ? '\n请在被控端 Mac 的系统设置里给 RustDesk 开启“完全磁盘访问权限”'
+        : '';
+    showToast('无法打开该文件夹：$reason$hint',
+        timeout: const Duration(seconds: 6));
   }
 
   void pushHistory() {

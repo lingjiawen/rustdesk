@@ -486,6 +486,9 @@ class _FileManagerViewState extends State<FileManagerView> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           headTools(),
+          Obx(() => controller.isLoading.value
+              ? const LinearProgressIndicator(minHeight: 2)
+              : const SizedBox(height: 2)),
           Expanded(
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,

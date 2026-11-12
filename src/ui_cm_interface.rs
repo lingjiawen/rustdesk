@@ -1056,7 +1056,7 @@ async fn handle_fs(
             dir,
             include_hidden,
         } => {
-            read_dir(&dir, include_hidden, tx).await;
+            spawn_read_dir(dir, include_hidden, tx.clone());
         }
         ipc::FS::RemoveDir {
             path,
@@ -1645,6 +1645,35 @@ async fn read_empty_dirs(dir: &str, include_hidden: bool, tx: &UnboundedSender<D
     }
 }
 
+/// How long a directory listing may take before the peer is told it failed.
+#[cfg(not(any(target_os = "ios")))]
+const READ_DIR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Lists a directory off the CM loop.
+///
+/// A listing stays blocked for as long as the OS keeps it waiting: macOS shows a consent
+/// prompt on the controlled screen for Desktop, Documents, Downloads and removable volumes,
+/// and the read does not return until someone answers it. Awaiting it in the loop stalls
+/// every later file request of the connection, so it runs as its own task, and the peer
+/// gets an error after `READ_DIR_TIMEOUT` instead of silence.
+#[cfg(not(any(target_os = "ios")))]
+fn spawn_read_dir(dir: String, include_hidden: bool, tx: UnboundedSender<Data>) {
+    tokio::spawn(async move {
+        let listing = read_dir(&dir, include_hidden, &tx);
+        if tokio::time::timeout(READ_DIR_TIMEOUT, listing).await.is_err() {
+            hbb_common::throttled_log!(
+                std::time::Duration::from_secs(60),
+                warn,
+                "Timed out listing a directory for the peer"
+            );
+            send_raw(
+                fs::new_error(0, "Timed out reading the directory", -1),
+                &tx,
+            );
+        }
+    });
+}
+
 #[cfg(not(any(target_os = "ios")))]
 async fn read_dir(dir: &str, include_hidden: bool, tx: &UnboundedSender<Data>) {
     let path = {
@@ -1865,6 +1894,34 @@ mod tests {
                     let bytes = result.unwrap();
                     let fd = FileDirectory::parse_from_bytes(&bytes).unwrap();
                     assert!(!fd.entries.is_empty());
+                }
+                _ => panic!("unexpected data"),
+            }
+            let _ = fs::remove_dir_all(&dir);
+        });
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "ios")))]
+    fn spawn_read_dir_replies_from_its_own_task() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = unbounded_channel();
+            let dir = std::env::temp_dir().join("rustdesk_spawn_read_dir_test");
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+
+            super::spawn_read_dir(dir.to_string_lossy().to_string(), false, tx);
+
+            match rx.recv().await.unwrap() {
+                Data::RawMessage(bytes) => {
+                    let mut msg = Message::new();
+                    msg.merge_from_bytes(&bytes).unwrap();
+                    assert!(msg
+                        .file_response()
+                        .dir()
+                        .path
+                        .contains("rustdesk_spawn_read_dir_test"));
                 }
                 _ => panic!("unexpected data"),
             }
