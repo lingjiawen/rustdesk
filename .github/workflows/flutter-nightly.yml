@@ -1,9 +1,8 @@
 name: Flutter Nightly Build
 
 on:
-  schedule:
-    # schedule build every night
-    - cron: "0 0 * * *"
+  # The nightly schedule is off in this fork: the full matrix needs upstream's signing
+  # secrets and a 3.24.5 source state. Use custom-windows.yml, or run this by hand.
   workflow_dispatch:
 
 jobs:
