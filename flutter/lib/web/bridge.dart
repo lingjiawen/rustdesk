@@ -995,6 +995,10 @@ class RustdeskImpl {
     return '{}';
   }
 
+  bool mainPrepareExit({dynamic hint}) {
+    return true;
+  }
+
   Future<void> mainSetLocalOption(
       {required String key, required String value, dynamic hint}) {
     return Future(() => js.context.callMethod('setByName', [

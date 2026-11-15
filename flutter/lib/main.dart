@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' show AppExitResponse;
 
 import 'package:bot_toast/bot_toast.dart';
 import 'package:desktop_multi_window/desktop_multi_window.dart';
@@ -469,6 +470,15 @@ class _AppState extends State<App> with WidgetsBindingObserver {
   @override
   void didChangeMetrics() {
     _updateOrientation();
+  }
+
+  // Quitting from the Dock or the app menu lands here, not in the window-close
+  // path that closes sessions first. Their threads would keep pushing events
+  // into the Dart VM while it shuts down, which aborts the app.
+  @override
+  Future<AppExitResponse> didRequestAppExit() async {
+    if (isDesktop) bind.mainPrepareExit();
+    return AppExitResponse.exit;
   }
 
   void _updateOrientation() {

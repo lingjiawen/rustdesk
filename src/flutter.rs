@@ -1888,6 +1888,20 @@ pub fn stop_global_event_stream(app_type: String) {
     let _ = GLOBAL_EVENT_STREAM.write().unwrap().remove(&app_type);
 }
 
+/// The app is about to exit while sessions may still be running. Their threads keep pushing
+/// events to Dart until they notice, and a post into a Dart VM that is shutting down aborts the
+/// process (macOS reports it as "Out of memory" in Dart's zone allocator). Drop every
+/// Rust-to-Dart sink first, so whatever is pushed afterwards finds none.
+pub fn detach_event_streams() {
+    log::info!("App exit requested, detaching event streams from Dart");
+    for session in sessions::get_sessions() {
+        for h in session.session_handlers.write().unwrap().values_mut() {
+            h.event_stream = None;
+        }
+    }
+    GLOBAL_EVENT_STREAM.write().unwrap().clear();
+}
+
 #[inline]
 fn session_send_touch_scale(
     session_id: SessionID,

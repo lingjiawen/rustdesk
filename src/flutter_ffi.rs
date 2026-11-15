@@ -1285,6 +1285,12 @@ pub fn main_set_app_in_background(background: bool) {
     let _ = background;
 }
 
+/// Desktop: the OS asked the app to quit and it is about to; see `flutter::detach_event_streams`.
+pub fn main_prepare_exit() -> SyncReturn<bool> {
+    crate::flutter::detach_event_streams();
+    SyncReturn(true)
+}
+
 /// This device's side of a connection for the mobile connection details: the NAT type it last
 /// tested and whether it holds a public IPv6 address.
 pub fn main_get_network_info() -> SyncReturn<String> {
