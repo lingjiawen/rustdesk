@@ -1,16 +1,21 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/mobile/widgets/touch_gesture_engine.dart';
 
 class _RecordingSink implements TouchGestureSink {
   final events = <String>[];
+  final moves = <Offset>[];
   bool touchable = true;
 
   @override
   void prepareCursorMove() => events.add('prepare');
   @override
-  void moveCursorBy(Offset delta, Offset position) => events.add('moveBy');
+  void moveCursorBy(Offset delta, Offset position) {
+    events.add('moveBy');
+    moves.add(delta);
+  }
   @override
   bool canTouchAt(Offset position) => touchable;
   @override
@@ -36,6 +41,8 @@ class _RecordingSink implements TouchGestureSink {
   void showHint(TouchHint? hint) => events.add('hint ${hint?.name}');
   @override
   void haptic(TouchHaptic kind) {}
+  @override
+  void systemSwipe(TouchSwipe direction) => events.add('swipe ${direction.name}');
 
   List<String> get actions => events
       .where((e) => !e.startsWith('hint') && e != 'prepare')
@@ -140,6 +147,37 @@ void main() {
       expect(sink.actions, ['click left', 'down left', 'moveBy', 'up left']);
     });
 
+    test('a fast finger sends the cursor farther than a slow one', () {
+      c.pointerDown(1, const Offset(100, 100), clock.now);
+      c.pointerMove(1, const Offset(100, 115), clock.advance(150));
+      c.pointerMove(1, const Offset(100, 130), clock.advance(150));
+      c.pointerUp(1, const Offset(100, 130), clock.advance(20));
+      final slow = sink.moves.last.distance;
+      setUpMode(touchMode: false);
+      c.pointerDown(1, const Offset(100, 100), clock.now);
+      c.pointerMove(1, const Offset(100, 115), clock.advance(5));
+      c.pointerMove(1, const Offset(100, 130), clock.advance(5));
+      c.pointerUp(1, const Offset(100, 130), clock.advance(20));
+      final fast = sink.moves.last.distance;
+      expect(slow, lessThan(15));
+      expect(fast, greaterThan(15 * 2));
+    });
+
+    test('three-finger swipe up opens the overview without clicking', () {
+      c.pointerDown(1, const Offset(100, 300), clock.now);
+      c.pointerDown(2, const Offset(150, 300), clock.advance(10));
+      c.pointerDown(3, const Offset(200, 300), clock.advance(10));
+      for (var y = 290; y >= 220; y -= 10) {
+        c.pointerMove(1, Offset(100, y.toDouble()), clock.advance(8));
+        c.pointerMove(2, Offset(150, y.toDouble()), clock.now);
+        c.pointerMove(3, Offset(200, y.toDouble()), clock.now);
+      }
+      c.pointerUp(1, const Offset(100, 220), clock.advance(10));
+      c.pointerUp(2, const Offset(150, 220), clock.now);
+      c.pointerUp(3, const Offset(200, 220), clock.now);
+      expect(sink.actions, ['swipe up']);
+    });
+
     test('two fingers moving together scroll; pinching zooms', () {
       c.pointerDown(1, const Offset(100, 100), clock.now);
       c.pointerDown(2, const Offset(200, 100), clock.advance(10));
@@ -201,5 +239,15 @@ void main() {
       c.pointerUp(1, const Offset(5, 5), clock.advance(60));
       expect(sink.actions, isEmpty);
     });
+  });
+
+  test('three-finger swipes map to each desktop\'s own gestures', () {
+    final up = swipeShortcut(TouchSwipe.up, kPeerPlatformMacOS)!;
+    expect([up.key, up.ctrl], ['VK_UP', true]);
+    final left = swipeShortcut(TouchSwipe.left, kPeerPlatformMacOS)!;
+    expect([left.key, left.ctrl], ['VK_RIGHT', true]);
+    final win = swipeShortcut(TouchSwipe.up, kPeerPlatformWindows)!;
+    expect([win.key, win.command], ['VK_TAB', true]);
+    expect(swipeShortcut(TouchSwipe.up, 'Android'), isNull);
   });
 }

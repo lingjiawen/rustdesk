@@ -868,8 +868,8 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Import from Files", "从“文件”导入"),
         ("Advanced network settings", "高级网络设置"),
         ("touch-mode-chooser-title", "选择操作方式"),
-        ("touch-mode-chooser-mouse-1", "像笔记本触控板：手指移动指针，轻点就是点击"),
-        ("touch-mode-chooser-mouse-2", "双指轻点右键，双指滑动滚动，适合精细操作"),
+        ("touch-mode-chooser-mouse-1", "像 Mac 触控板：手指移动指针，划得越快移得越远，轻点就是点击"),
+        ("touch-mode-chooser-mouse-2", "双指轻点右键、双指滑动滚动，三指上滑调度中心、左右滑切换桌面"),
         ("touch-mode-chooser-touch-1", "手指点哪里就点哪里，长按是右键"),
         ("touch-mode-chooser-touch-2", "单指滑动滚动页面，适合浏览和简单点击"),
         ("touch-mode-chooser-tip", "之后可以随时在悬浮球里切换。"),
@@ -880,5 +880,8 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Asymmetric NAT", "非对称型（可打洞）"),
         ("Symmetric NAT", "对称型（难打洞）"),
         ("Untested", "未检测"),
+        ("Trackpad mode", "触控板模式"),
+        ("Three-Finger Swipe", "三指轻扫"),
+        ("Mission Control / Desktops", "调度中心 / 切换桌面"),
     ].iter().cloned().collect();
 }

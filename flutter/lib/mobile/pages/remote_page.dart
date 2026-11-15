@@ -8,6 +8,7 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse_widgets.dart';
 import 'package:flutter_hbb/mobile/widgets/gesture_help.dart';
+import 'package:flutter_hbb/mobile/widgets/ime_text.dart';
 import 'package:flutter_hbb/mobile/widgets/touch_gesture_engine.dart';
 import 'package:flutter_hbb/mobile/widgets/session_panel.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
@@ -129,6 +130,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    if (isIOS) _textController.addListener(_onIOSTextValue);
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
     gFFI.start(
       widget.id,
@@ -196,6 +198,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   @override
   Future<void> dispose() async {
+    if (isIOS) _textController.removeListener(_onIOSTextValue);
     HardwareKeyboard.instance.removeHandler(_handleLocalKeyEvent);
     WidgetsBinding.instance.removeObserver(this);
     // Close the session up-front. `gFFI.close()` below only calls `sessionClose`
@@ -393,17 +396,6 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       newStr = subNewValue.substring(common);
     }
 
-    // Set the value to the old value and early return if is still composing. (1 && 2)
-    // 1. The composing range is valid
-    // 2. The new string is shorter than the composing range.
-    if (_textController.value.isComposingRangeValid) {
-      // iOS only marks text while an input method (Pinyin, Kana, Hangul) is
-      // composing. Sending it would type the first letter and then erase it,
-      // so wait until the composition is committed.
-      _value = oldValue;
-      return;
-    }
-
     // Delete the different part in the old value.
     for (i = 0; i < subOldValue.length - common; ++i) {
       inputModel.inputKey('VK_BACK');
@@ -462,13 +454,24 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     }
   }
 
+  // iOS: sends what the input method has committed. Marked text (Pinyin
+  // letters still being composed) is left out, and a candidate committed by
+  // clearing the mark alone, with the text unchanged, is caught here because
+  // onChanged never reports it.
+  void _onIOSTextValue() {
+    if (!inputModel.keyboardInputAllowed) return;
+    final committed = committedImeText(_textController.value);
+    if (committed == _value) return;
+    _handleIOSSoftKeyboardInput(committed);
+  }
+
   // handle mobile virtual keyboard
   void handleSoftKeyboardInput(String newValue) {
     if (!inputModel.keyboardInputAllowed) {
       return;
     }
     if (isIOS) {
-      _handleIOSSoftKeyboardInput(newValue);
+      _onIOSTextValue();
     } else {
       _handleNonIOSSoftKeyboardInput(newValue);
     }
@@ -843,6 +846,36 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                       (_showEdit || chatKeyboardRequested),
                   showGestureHelp: _showGestureHelp);
             }),
+            if (isIOS && _showEdit)
+              // The text field is hidden, so show what the input method is
+              // composing; nothing reaches the remote until it is committed.
+              Positioned(
+                top: MediaQuery.of(context).padding.top + 8,
+                left: 0,
+                right: 0,
+                child: IgnorePointer(
+                  child: ValueListenableBuilder<TextEditingValue>(
+                    valueListenable: _textController,
+                    builder: (context, value, _) {
+                      final composing = composingImeText(value);
+                      if (composing.isEmpty) return const SizedBox.shrink();
+                      return Center(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withAlpha(180),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Text(composing,
+                              style: const TextStyle(
+                                  color: Colors.white, fontSize: 16)),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
             SizedBox(
               width: 0,
               height: 0,

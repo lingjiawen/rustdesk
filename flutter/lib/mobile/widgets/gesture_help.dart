@@ -370,6 +370,8 @@ extension on _GestureHelpState {
             "Right Mouse"),
         info(GestureIcons.iconGestureFDrag, "Two-Finger Move", "Canvas Move"),
         info(GestureIcons.iconGesturePinch, "Pinch to Zoom", "Canvas Zoom"),
+        info(GestureIcons.iconGestureFThreeFingers, "Three-Finger Swipe",
+            "Mission Control / Desktops"),
       ];
     }
     return [
@@ -383,6 +385,8 @@ extension on _GestureHelpState {
       info(GestureIcons.iconGesturePinch, "Pinch to Zoom", "Canvas Zoom"),
       info(GestureIcons.iconGestureFThreeFingers, "Three-Finger Tap",
           "Middle Mouse"),
+      info(GestureIcons.iconGestureFThreeFingers, "Three-Finger Swipe",
+          "Mission Control / Desktops"),
     ];
   }
 }

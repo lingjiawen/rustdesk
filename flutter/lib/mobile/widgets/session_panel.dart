@@ -505,7 +505,7 @@ class _SessionPanelState extends State<SessionPanel> {
       (Icons.keyboard, translate('Keyboard'), () => _run(a.openKeyboard)),
       (
         touch ? Icons.touch_app : Icons.mouse,
-        translate(touch ? 'Touch mode' : 'Mouse mode'),
+        translate(touch ? 'Touch mode' : 'Trackpad mode'),
         () {
           a.toggleTouchMode();
           setState(() {});
@@ -827,7 +827,7 @@ Future<void> maybeShowTouchModeChooser(BuildContext context, FFI ffi) async {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            option(false, Icons.mouse, translate('Mouse mode'), [
+            option(false, Icons.mouse, translate('Trackpad mode'), [
               translate('touch-mode-chooser-mouse-1'),
               translate('touch-mode-chooser-mouse-2'),
             ]),

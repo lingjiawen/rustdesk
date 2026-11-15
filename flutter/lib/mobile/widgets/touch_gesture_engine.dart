@@ -6,8 +6,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../common.dart';
+import '../../consts.dart';
 import '../../models/input_model.dart';
 import '../../models/model.dart';
+import 'session_panel.dart';
 
 /// Shown at the top-left while a held finger is ready to drag or right-click,
 /// so the user knows what moving or releasing it will do.
@@ -16,6 +18,9 @@ enum TouchHint { drag, rightClick }
 enum TouchButton { left, right, middle }
 
 enum TouchHaptic { click, ready, heavy }
+
+/// A three-finger swipe, named by the direction the fingers moved.
+enum TouchSwipe { up, down, left, right }
 
 /// What the gesture classifier asks the remote session to do. Calls are
 /// fire-and-forget; the implementation keeps them in order.
@@ -48,6 +53,43 @@ abstract class TouchGestureSink {
 
   void showHint(TouchHint? hint);
   void haptic(TouchHaptic kind);
+
+  /// A three-finger swipe: the desktop gesture the peer's own trackpad gives it.
+  void systemSwipe(TouchSwipe direction);
+}
+
+/// What a three-finger swipe sends, the way each desktop's own trackpad maps
+/// it: overview up, the app's windows or the desktop down, the neighbouring
+/// desktop sideways, where the content follows the fingers.
+SessionShortcut? swipeShortcut(TouchSwipe direction, String platform) {
+  if (platform == kPeerPlatformMacOS) {
+    switch (direction) {
+      case TouchSwipe.up:
+        return const SessionShortcut('Mission Control', 'VK_UP', ctrl: true);
+      case TouchSwipe.down:
+        return const SessionShortcut('App windows', 'VK_DOWN', ctrl: true);
+      case TouchSwipe.left:
+        return const SessionShortcut('Next desktop', 'VK_RIGHT', ctrl: true);
+      case TouchSwipe.right:
+        return const SessionShortcut('Previous desktop', 'VK_LEFT',
+            ctrl: true);
+    }
+  }
+  if (platform == kPeerPlatformWindows) {
+    switch (direction) {
+      case TouchSwipe.up:
+        return const SessionShortcut('Task view', 'VK_TAB', command: true);
+      case TouchSwipe.down:
+        return const SessionShortcut('Show desktop', 'VK_D', command: true);
+      case TouchSwipe.left:
+        return const SessionShortcut('Next desktop', 'VK_RIGHT',
+            ctrl: true, command: true);
+      case TouchSwipe.right:
+        return const SessionShortcut('Previous desktop', 'VK_LEFT',
+            ctrl: true, command: true);
+    }
+  }
+  return null;
 }
 
 typedef TouchTimerFactory = Timer Function(
@@ -73,9 +115,12 @@ enum _Phase {
 /// Unlike the arena-based recognizers, a tap is sent the moment the finger
 /// lifts, so a click never waits for a possible double tap.
 ///
-/// Pointer mode (like a trackpad): one finger moves the cursor, tap clicks,
-/// two-finger tap right-clicks, two fingers scroll, pinch zooms the canvas,
-/// double-tap-and-move or hold-and-move drags.
+/// Pointer mode (like a trackpad): one finger moves the cursor, faster for a
+/// faster finger, tap clicks, two-finger tap right-clicks, two fingers scroll,
+/// pinch zooms the canvas, double-tap-and-move or hold-and-move drags.
+///
+/// In both modes three fingers tapped middle-click and swiped give the peer's
+/// overview and desktop gestures.
 ///
 /// Touch mode (the finger is the cursor): tap clicks under the finger, a long
 /// hold right-clicks, a short hold then move drags, one finger scrolls, two
@@ -100,12 +145,24 @@ class TouchGestureClassifier {
   static const Duration multiTapMaxDuration = Duration(milliseconds: 350);
   static const double pinchThreshold = 0.06;
   static const double panThreshold = 8;
+  static const double swipeThreshold = 48;
+
+  /// Pointer gain for a finger speed in logical pixels per millisecond: a
+  /// slow finger places the cursor finer than it moves, a fast one sends it
+  /// across the screen, the way a trackpad's acceleration does.
+  static double pointerGain(double speed) {
+    const slow = 0.1, fast = 2.0, minGain = 0.6, maxGain = 2.4;
+    final t = ((speed - slow) / (fast - slow)).clamp(0.0, 1.0);
+    return minGain + (maxGain - minGain) * t * t * (3 - 2 * t);
+  }
 
   final Map<int, Offset> _pointers = {};
   _Phase _phase = _Phase.idle;
 
   Offset _start = Offset.zero;
   Duration _startTime = Duration.zero;
+  Duration _lastMoveTime = Duration.zero;
+  double _speed = 0;
   bool _afterTap = false;
   int? _dragPointer;
   Timer? _dragTimer;
@@ -179,7 +236,7 @@ class TouchGestureClassifier {
         } else {
           _phase = _Phase.cursorMove;
           sink.prepareCursorMove();
-          sink.moveCursorBy(position - _start, position);
+          sink.moveCursorBy(_accelerate(position - _start, time), position);
         }
         return;
       case _Phase.dragReady:
@@ -189,7 +246,7 @@ class TouchGestureClassifier {
         _startDrag(pointer, position);
         return;
       case _Phase.cursorMove:
-        sink.moveCursorBy(position - previous, position);
+        sink.moveCursorBy(_accelerate(position - previous, time), position);
         return;
       case _Phase.scroll:
         sink.scroll(position - previous);
@@ -199,7 +256,7 @@ class TouchGestureClassifier {
         if (touchMode) {
           sink.dragCursorTo(position - previous, position);
         } else {
-          sink.moveCursorBy(position - previous, position);
+          sink.moveCursorBy(_accelerate(position - previous, time), position);
         }
         return;
       case _Phase.multi:
@@ -308,6 +365,8 @@ class TouchGestureClassifier {
     _phase = _Phase.oneDown;
     _start = position;
     _startTime = time;
+    _lastMoveTime = time;
+    _speed = 0;
     final lastTapTime = _lastTapTime;
     final lastTapPos = _lastTapPos;
     _afterTap = lastTapTime != null &&
@@ -399,6 +458,14 @@ class TouchGestureClassifier {
     if (_phase == _Phase.multi) {
       final moved = (centroid - _multiStartCentroid).distance;
       final ratio = _multiStartSpread > 0 ? spread / _multiStartSpread : 1.0;
+      if (_pointers.length >= 3) {
+        if (moved < swipeThreshold) return;
+        _multiTapEligible = false;
+        _phase = _Phase.done;
+        sink.systemSwipe(_swipeDirection(centroid - _multiStartCentroid));
+        sink.haptic(TouchHaptic.heavy);
+        return;
+      }
       if (_pointers.length == 2 && (ratio - 1).abs() > pinchThreshold) {
         _phase = _Phase.pinch;
       } else if (moved > panThreshold) {
@@ -432,6 +499,20 @@ class TouchGestureClassifier {
     _lastCentroid = centroid;
     _lastSpread = spread;
   }
+
+  Offset _accelerate(Offset delta, Duration time) {
+    final ms = max((time - _lastMoveTime).inMicroseconds / 1000.0, 1.0);
+    _lastMoveTime = time;
+    final speed = delta.distance / ms;
+    // Touch events come every few milliseconds; smooth over them so one
+    // irregular gap does not jerk the cursor.
+    _speed = _speed == 0 ? speed : (_speed + speed) / 2;
+    return delta * pointerGain(_speed);
+  }
+
+  static TouchSwipe _swipeDirection(Offset d) => d.dx.abs() > d.dy.abs()
+      ? (d.dx < 0 ? TouchSwipe.left : TouchSwipe.right)
+      : (d.dy < 0 ? TouchSwipe.up : TouchSwipe.down);
 
   void _resetMultiBaseline({required bool start}) {
     final centroid = _centroid();
@@ -657,6 +738,12 @@ class _TouchGestureLayerState extends State<TouchGestureLayer>
   void showHint(TouchHint? hint) {
     if (!mounted || _hint == hint) return;
     setState(() => _hint = hint);
+  }
+
+  @override
+  void systemSwipe(TouchSwipe direction) {
+    final shortcut = swipeShortcut(direction, ffi.ffiModel.pi.platform);
+    if (shortcut != null) sendSessionShortcut(ffi, shortcut);
   }
 
   @override
