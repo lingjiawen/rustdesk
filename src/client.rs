@@ -114,6 +114,27 @@ const RESTART_REMOTE_DEVICE_GRACE: Duration = Duration::from_secs(5 * 60);
 pub const VIDEO_QUEUE_SIZE: usize = 120;
 const MAX_DECODE_FAIL_COUNTER: usize = 3;
 
+/// Whether the first encoded frame in `vf` is a key frame.
+#[cfg(target_os = "ios")]
+fn starts_with_key_frame(vf: &VideoFrame) -> bool {
+    use video_frame::Union;
+    match &vf.union {
+        Some(Union::Vp8s(f))
+        | Some(Union::Vp9s(f))
+        | Some(Union::Av1s(f))
+        | Some(Union::H264s(f))
+        | Some(Union::H265s(f)) => f.frames.first().map_or(false, |f| f.key),
+        _ => true,
+    }
+}
+
+/// Set by the iOS app while it is in the background. iOS tears down
+/// VideoToolbox sessions there, so decoding would only fail and mark the codec
+/// unsupported for the rest of the session.
+#[cfg(target_os = "ios")]
+pub static APP_IN_BACKGROUND: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub const LOGIN_MSG_PASSWORD_EMPTY: &str = "Empty Password";
 pub const LOGIN_MSG_PASSWORD_WRONG: &str = "Wrong Password";
 pub const LOGIN_MSG_2FA_WRONG: &str = "Wrong 2FA Code";
@@ -367,6 +388,51 @@ fn tcp_punch_allowed() -> bool {
             || crate::get_webrtc_enabled())
 }
 
+/// The peer relays at once when told we are SYMMETRIC, yet a TCP punch only needs the peer's own
+/// mapping to be predictable: it listens where hbbs saw it, and a full-cone or address-restricted
+/// gateway in front of it lets our SYN in from whatever port our NAT picked. Phones on cellular
+/// are nearly always SYMMETRIC, so they never got that chance. Report UNKNOWN until a round with
+/// this peer has ended on relay, then SYMMETRIC again so later rounds relay without the wasted
+/// punch. hbbs overwrites this with SYMMETRIC where it requires relay (ALWAYS_USE_RELAY, a peer on
+/// its LAN), and a forced relay stays SYMMETRIC: the open-source hbbs drops `force_relay`, so the
+/// type is all that keeps the peer from punching.
+fn reported_nat_type(nat_type: NatType, force_relay: bool, direct_failures: i32) -> NatType {
+    if nat_type == NatType::SYMMETRIC && !force_relay && direct_failures == 0 {
+        NatType::UNKNOWN_NAT
+    } else {
+        nat_type
+    }
+}
+
+#[cfg(test)]
+mod reported_nat_type_tests {
+    use super::*;
+
+    #[test]
+    fn symmetric_nat_gets_one_punch_per_peer() {
+        assert_eq!(
+            reported_nat_type(NatType::SYMMETRIC, false, 0),
+            NatType::UNKNOWN_NAT
+        );
+        assert_eq!(
+            reported_nat_type(NatType::SYMMETRIC, false, 1),
+            NatType::SYMMETRIC
+        );
+    }
+
+    #[test]
+    fn forced_relay_and_other_types_are_reported_as_is() {
+        assert_eq!(
+            reported_nat_type(NatType::SYMMETRIC, true, 0),
+            NatType::SYMMETRIC
+        );
+        assert_eq!(
+            reported_nat_type(NatType::ASYMMETRIC, false, 0),
+            NatType::ASYMMETRIC
+        );
+    }
+}
+
 impl Client {
     const CLIENT_CLIPBOARD_NAME: &'static str = "client-clipboard";
 
@@ -492,6 +558,11 @@ impl Client {
                 (check_port(other_server, RENDEZVOUS_PORT), Vec::new(), true)
             }
         };
+        // This build ships without public servers, so an empty value means the user
+        // has not set one yet. Dialing "" only yields an opaque socket error.
+        if rendezvous_server.is_empty() {
+            bail!("ID server is not configured");
+        }
 
         // Same relay gate as the v6 socket below: under any forced relay the v6 punch cannot
         // be used, so probing v6 reachability is wasted work on every such connection.
@@ -853,6 +924,12 @@ impl Client {
         let mut peer_addr = Config::get_any_listen_addr(true);
         let mut peer_nat_type = NatType::UNKNOWN_NAT;
         let my_nat_type = crate::get_nat_type(100).await;
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let my_nat_type = if interface.is_force_relay() {
+            my_nat_type
+        } else {
+            crate::common::nat_type_for_network(my_addr.ip(), my_nat_type).await
+        };
         let mut is_local = false;
         let mut feedback = 0;
         use hbb_common::protobuf::Enum;
@@ -861,6 +938,11 @@ impl Client {
         } else {
             NatType::from_i32(my_nat_type).unwrap_or(NatType::UNKNOWN_NAT)
         };
+        let nat_type = reported_nat_type(
+            nat_type,
+            interface.is_force_relay(),
+            interface.get_lch().read().unwrap().direct_failures,
+        );
 
         let switch_code = interface.get_switch_code();
         let legacy_secure = !key.is_empty() && (!token.is_empty() || !switch_code.is_empty());
@@ -1077,6 +1159,7 @@ impl Client {
                                 }
                             }
                         }
+                        let has_ipv6_attempt = !connect_futures.is_empty();
                         signed_id_pk = rr.pk().into();
                         let mut webrtc_bridge_stop = None;
                         let mut webrtc_for_connect = None;
@@ -1189,6 +1272,19 @@ impl Client {
                                 )
                                 .await
                             }
+                        } else if has_ipv6_attempt {
+                            // The relay's single TCP connect lands before an IPv6 punch plus its
+                            // KCP handshake nearly every time, and taking the first success
+                            // dropped a punch that was about to complete. Hold the relay for the
+                            // same window WebRTC gets.
+                            let ipv6_fut = connect_futures.remove(0);
+                            race_transports_prefer_webrtc(
+                                ipv6_fut,
+                                connect_futures,
+                                Self::relay_fallback_delay_ms(),
+                                |result| result.3,
+                            )
+                            .await
                         } else {
                             // Run all connection attempts concurrently, take the first success.
                             select_ok(connect_futures).await.map(|r| r.0)
@@ -1541,7 +1637,15 @@ impl Client {
         };
         let (mut conn, kcp, mut typ, mut direct) = match direct_result {
             Ok((conn, kcp, typ, direct)) => (Ok(conn), kcp, typ, direct),
-            Err(e) => (Err(e), None, "", false),
+            Err(e) => {
+                log::info!(
+                    "direct connection to {} failed after {:?}: {}",
+                    peer,
+                    start.elapsed(),
+                    e
+                );
+                (Err(e), None, "", false)
+            }
         };
         if let Some(stop) = webrtc_bridge_stop {
             let _ = stop.send(());
@@ -4021,6 +4125,8 @@ pub fn start_video_thread<F, T>(
         let mut count = 0;
         let mut duration = std::time::Duration::ZERO;
         let mut skip_beginning = 0;
+        #[cfg(target_os = "ios")]
+        let mut ios_resume_pending = false;
         loop {
             if let Ok(data) = video_receiver.recv() {
                 match data {
@@ -4045,6 +4151,24 @@ pub fn start_video_thread<F, T>(
                                 continue;
                             }
                         };
+                        #[cfg(target_os = "ios")]
+                        {
+                            if APP_IN_BACKGROUND.load(std::sync::atomic::Ordering::Relaxed) {
+                                ios_resume_pending = true;
+                                continue;
+                            }
+                            // A fresh decoder that sees a delta frame first fails, and a
+                            // failed first frame marks the codec unsupported, so wait for
+                            // the key frame the UI requests on return.
+                            if ios_resume_pending {
+                                if !starts_with_key_frame(&vf) {
+                                    continue;
+                                }
+                                ios_resume_pending = false;
+                                // Dropped so a new decoder is created below.
+                                video_handler = None;
+                            }
+                        }
                         let display = vf.display as usize;
                         let start = std::time::Instant::now();
                         let format = CodecFormat::from(&vf);
@@ -5256,6 +5380,7 @@ pub fn check_if_retry(msgtype: &str, title: &str, text: &str, retry_for_relay: b
                 && !text.to_lowercase().contains("manually")
                 && !text.to_lowercase().contains("restricted")
                 && !text.to_lowercase().contains("incoming only")
+                && !text.to_lowercase().contains("not configured")
                 && !text.to_lowercase().contains("not allowed")))
 }
 
@@ -5269,6 +5394,16 @@ mod retry_tests {
             "error",
             "Connection Error",
             "Incoming only mode",
+            false,
+        ));
+    }
+
+    #[test]
+    fn missing_id_server_error_is_not_retryable() {
+        assert!(!check_if_retry(
+            "error",
+            "Connection Error",
+            "ID server is not configured",
             false,
         ));
     }

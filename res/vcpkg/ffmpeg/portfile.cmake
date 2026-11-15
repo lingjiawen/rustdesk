@@ -178,12 +178,15 @@ elseif(VCPKG_TARGET_IS_OSX)
 --enable-hwaccel=h264_videotoolbox,hevc_videotoolbox \
 ")
 elseif(VCPKG_TARGET_IS_IOS)
+    # VideoToolbox decodes H264/H265 in hardware; software decoding of a Retina
+    # desktop is too slow on a phone.
     string(APPEND OPTIONS "\
 --arch=arm64 \
 --disable-autodetect \
 --disable-hwaccels \
 --disable-encoders \
---disable-videotoolbox \
+--enable-videotoolbox \
+--enable-hwaccel=h264_videotoolbox,hevc_videotoolbox \
 --extra-cflags=\"-arch arm64 -mios-version-min=8.0 -fembed-bitcode\" \
 --extra-ldflags=\"-arch arm64 -mios-version-min=8.0 -fembed-bitcode\" \
 ")

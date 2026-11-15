@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/models/input_model.dart';
 import 'package:flutter_hbb/models/model.dart';
+import 'package:flutter_hbb/mobile/widgets/floating_mouse_widgets.dart';
 import 'package:flutter_hbb/utils/image.dart';
 import 'package:provider/provider.dart';
 
@@ -274,7 +275,7 @@ class _FloatingMouseState extends State<FloatingMouse> {
 
   void _resetPosition() {
     setState(() {
-      final size = MediaQuery.of(context).size;
+      final size = sessionBodySize(context);
       _position = Offset(
         (size.width - _baseMouseWidth * _mouseScale) / 2,
         (size.height - _baseMouseHeight * _mouseScale) / 2,
@@ -304,13 +305,27 @@ class _FloatingMouseState extends State<FloatingMouse> {
     final renderBox = context.findRenderObject() as RenderBox?;
     if (renderBox == null || !renderBox.attached) return;
 
-    final newRect = renderBox.localToGlobal(Offset.zero) & renderBox.size;
+    // Blocked rects are checked against body-local touch positions, which
+    // exclude the safe-area inset that global positions include.
+    final padding = MediaQueryData.fromView(View.of(context)).padding;
+    final newRect = (renderBox.localToGlobal(Offset.zero) -
+            Offset(padding.left, padding.top)) &
+        renderBox.size;
 
     if (_lastBlockedRect != null) {
       _cursorModel.removeBlockedRect(_lastBlockedRect!);
     }
     _cursorModel.addBlockedRect(newRect);
     _lastBlockedRect = newRect;
+  }
+
+  /// The cursor tip in canvas coordinates, as [InputModel.handleMouse]
+  /// expects: without the safe-area inset and the key-bar canvas shift.
+  Offset _getMouseCanvasPosition() {
+    final global = _getMouseGlobalPosition();
+    final padding = MediaQueryData.fromView(View.of(context)).padding;
+    final adjustY = widget.ffi.canvasModel.getAdjustY();
+    return Offset(global.dx - padding.left, global.dy - padding.top - adjustY);
   }
 
   Offset _getMouseGlobalPosition() {
@@ -362,7 +377,7 @@ class _FloatingMouseState extends State<FloatingMouse> {
   void _onMoveUpdateDelta(Offset delta) {
     _resetCollapseTimer();
     final context = this.context;
-    final size = MediaQuery.of(context).size;
+    final size = sessionBodySize(context);
     Offset newPosition = _position + delta;
     double minX = 0;
     double minY = 0;
@@ -383,7 +398,7 @@ class _FloatingMouseState extends State<FloatingMouse> {
       Offset? mouseGlobalPosition;
       Offset? positionInRemoteDisplay;
       if (isPositionChanged) {
-        mouseGlobalPosition = _getMouseGlobalPosition();
+        mouseGlobalPosition = _getMouseCanvasPosition();
         final evt = _inputModel.handleMouse(
             InputModel.getMouseEventMove(), mouseGlobalPosition,
             moveCanvas: false);
@@ -401,7 +416,7 @@ class _FloatingMouseState extends State<FloatingMouse> {
       }
 
       // Get the mouse global position and position in remote display
-      mouseGlobalPosition ??= _getMouseGlobalPosition();
+      mouseGlobalPosition ??= _getMouseCanvasPosition();
       if (positionInRemoteDisplay == null) {
         final evt = _inputModel.processEventToPeer(
             InputModel.getMouseEventMove(), mouseGlobalPosition,

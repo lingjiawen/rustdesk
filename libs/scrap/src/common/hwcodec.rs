@@ -633,7 +633,7 @@ impl HwCodecConfig {
         }
         #[cfg(target_os = "ios")]
         {
-            HwCodecConfig::default()
+            ios_videotoolbox_config()
         }
     }
 
@@ -763,4 +763,41 @@ pub fn start_check_process() {
     ONCE.call_once(|| {
         std::thread::spawn(f);
     });
+}
+
+/// iOS cannot spawn the codec-check process, so VideoToolbox decoders are
+/// probed in-process once. Creating the decoder opens a VideoToolbox device.
+#[cfg(target_os = "ios")]
+fn ios_videotoolbox_config() -> HwCodecConfig {
+    use hwcodec::ffmpeg::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
+    static IOS_CONFIG: std::sync::OnceLock<HwCodecConfig> = std::sync::OnceLock::new();
+    IOS_CONFIG
+        .get_or_init(|| {
+            let mut ram_decode = Vec::new();
+            for (name, format) in [("h264", DataFormat::H264), ("hevc", DataFormat::H265)] {
+                let ctx = DecodeContext {
+                    name: name.to_owned(),
+                    device_type: AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                    thread_count: 1,
+                };
+                if Decoder::new(ctx).is_ok() {
+                    ram_decode.push(CodecInfo {
+                        name: name.to_owned(),
+                        format,
+                        hwdevice: AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                        priority: hwcodec::ffmpeg_ram::Priority::Best as _,
+                        ..Default::default()
+                    });
+                }
+            }
+            log::info!(
+                "VideoToolbox decoders: {:?}",
+                ram_decode.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()
+            );
+            HwCodecConfig {
+                ram_decode,
+                ..Default::default()
+            }
+        })
+        .clone()
 }

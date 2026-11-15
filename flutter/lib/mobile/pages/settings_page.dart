@@ -97,6 +97,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   var _hideServer = false;
   var _hideProxy = false;
   var _hideNetwork = false;
+  // iOS folds the low-level network switches away; most users never need them.
+  var _showAdvancedNetwork = !isIOS;
   var _hideWebSocket = false;
   var _enableTrustedDevices = false;
   var _enableTcpPunch = false;
@@ -774,7 +776,19 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                 onPressed: (context) {
                   showDeployDialog();
                 }),
-          if (!disabledSettings && !_hideNetwork && !_hideWebSocket)
+          if (isIOS)
+            SettingsTile(
+              title: Text(translate('Advanced network settings')),
+              trailing: Icon(_showAdvancedNetwork
+                  ? Icons.expand_less
+                  : Icons.expand_more),
+              onPressed: (context) => setState(
+                  () => _showAdvancedNetwork = !_showAdvancedNetwork),
+            ),
+          if (_showAdvancedNetwork &&
+              !disabledSettings &&
+              !_hideNetwork &&
+              !_hideWebSocket)
             SettingsTile.switchTile(
               title: Text(translate('Use WebSocket')),
               initialValue: _allowWebSocket,
@@ -789,7 +803,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                       });
                     },
             ),
-          if (!_isUsingPublicServer)
+          if (_showAdvancedNetwork && !_isUsingPublicServer)
             SettingsTile.switchTile(
               title: Text(translate('Allow insecure TLS fallback')),
               initialValue: _allowInsecureTlsFallback,
@@ -821,7 +835,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                       });
                     },
             ),
-          if (!incomingOnly)
+          if (_showAdvancedNetwork && !incomingOnly)
             SettingsTile.switchTile(
               title: Text(translate('Enable TCP hole punching')),
               initialValue: _enableTcpPunch,
@@ -836,7 +850,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                       });
                     },
             ),
-          if (!incomingOnly)
+          if (_showAdvancedNetwork && !incomingOnly)
             SettingsTile.switchTile(
               title: Text(translate('Enable UDP hole punching')),
               initialValue: _enableUdpPunch,
@@ -851,7 +865,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                       });
                     },
             ),
-          if (!incomingOnly)
+          if (_showAdvancedNetwork && !incomingOnly)
             SettingsTile.switchTile(
               title: Text(translate('Enable IPv6 P2P connection')),
               initialValue: _enableIpv6Punch,
@@ -866,7 +880,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                       });
                     },
             ),
-          if (!incomingOnly)
+          if (_showAdvancedNetwork && !incomingOnly)
             SettingsTile.switchTile(
               title: Text(translate('Enable WebRTC P2P connection')),
               initialValue: _enableWebrtc,
@@ -946,6 +960,18 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                 setState(() {
                   _preventSleepWhileConnected = v;
                 });
+              },
+            ),
+          if (!incomingOnly)
+            SettingsTile.switchTile(
+              title: Text(translate('Legacy touch gestures')),
+              initialValue:
+                  bind.mainGetLocalOption(key: kOptionLegacyTouchGestures) ==
+                      'Y',
+              onToggle: (v) async {
+                await bind.mainSetLocalOption(
+                    key: kOptionLegacyTouchGestures, value: v ? 'Y' : '');
+                setState(() {});
               },
             ),
         ]),

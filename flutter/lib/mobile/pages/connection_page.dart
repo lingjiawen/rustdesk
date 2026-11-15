@@ -10,13 +10,18 @@ import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_hbb/models/peer_model.dart';
 
+import 'package:flutter/services.dart';
+
 import '../../common.dart';
+import '../../common/server_profiles.dart';
 import '../../common/widgets/peer_tab_page.dart';
 import '../../common/widgets/autocomplete.dart';
 import '../../consts.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
+import '../widgets/dialog.dart';
 import 'home_page.dart';
+import 'scan_page.dart';
 
 /// Connection page for connecting to a remote peer.
 class ConnectionPage extends StatefulWidget implements PageShape {
@@ -86,6 +91,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
             delegate: SliverChildListDelegate([
           if (!bind.isCustomClient() && !isIOS)
             Obx(() => _buildUpdateUI(stateGlobal.updateUrl.value)),
+          if (!isWeb) Obx(() => _buildServerHint()),
           _buildRemoteIDTextField(),
         ])),
         SliverFillRemaining(
@@ -100,7 +106,89 @@ class _ConnectionPageState extends State<ConnectionPage> {
   /// Connects to the selected peer.
   void onConnect() {
     var id = _idController.id;
+    // IP and domain:port peers are dialed directly and need no ID server.
+    if (!isWeb && _idServerMissing() && !id.contains('.') && !id.contains(':')) {
+      showServerSettings(gFFI.dialogManager, setState);
+      return;
+    }
     connect(context, id);
+  }
+
+  bool _idServerMissing() =>
+      bind.mainGetOptionSync(key: 'custom-rendezvous-server').trim().isEmpty;
+
+  /// This build ships without public servers, so explain that before a
+  /// connection attempt fails.
+  Widget _buildServerHint() {
+    // Saving in the server dialog updates the profiles; reading them here
+    // rebuilds the hint after the user saves.
+    ServerProfiles.profiles.length;
+    ServerProfiles.activeName.value;
+    final String message;
+    if (_idServerMissing()) {
+      message = translate('id-server-missing-tip');
+    } else if (bind.mainGetOptionSync(key: 'key').trim().isEmpty) {
+      message = translate('id-server-key-missing-tip');
+    } else {
+      return const SizedBox.shrink();
+    }
+    return Container(
+      margin: const EdgeInsets.only(top: 8, bottom: 4),
+      padding: const EdgeInsets.fromLTRB(12, 10, 4, 2),
+      decoration: BoxDecoration(
+        color: Colors.orange.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.orange.withOpacity(0.5)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(Icons.warning_amber_rounded,
+                  color: Colors.orange, size: 20),
+              const SizedBox(width: 8),
+              Expanded(child: Text(message)),
+            ],
+          ),
+          Wrap(
+            alignment: WrapAlignment.end,
+            children: [
+              TextButton(
+                onPressed: _importServerFromClipboard,
+                child: Text(translate('Paste config')),
+              ),
+              TextButton(
+                onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => ScanPage()),
+                ),
+                child: Text(translate('Scan QR')),
+              ),
+              TextButton(
+                onPressed: () =>
+                    showServerSettings(gFFI.dialogManager, setState),
+                child: Text(translate('Set up manually')),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Opens the server dialog pre-filled from the clipboard, so nothing is
+  /// saved until the user taps OK.
+  Future<void> _importServerFromClipboard() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final config = tryDecodeServerConfig(data?.text);
+    if (config == null) {
+      showToast(translate('Invalid server configuration'));
+      return;
+    }
+    await ServerProfiles.load();
+    await showServerSettingsWithValue(config, gFFI.dialogManager, setState);
   }
 
   void onFocusChanged() {

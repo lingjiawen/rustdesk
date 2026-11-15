@@ -712,8 +712,8 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
       actionId: kShortcutActionRefresh,
     ));
   }
-  // record
-  if (!(isDesktop || isWeb) &&
+  // record (RecordingModel.toggle does nothing on iOS)
+  if (!(isDesktop || isWeb || isIOS) &&
       bind.mainGetLocalOption(key: kOptionHideRecordingButton) != 'Y' &&
       (ffi.recordingModel.start || (perms["recording"] != false))) {
     v.add(TTextMenu(

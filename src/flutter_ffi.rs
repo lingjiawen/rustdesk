@@ -1276,6 +1276,27 @@ pub fn main_set_env(key: String, value: Option<String>) -> SyncReturn<()> {
     SyncReturn(())
 }
 
+/// iOS: the app moved to or from the background. Video frames are dropped
+/// meanwhile; the UI asks for a refresh when it returns.
+pub fn main_set_app_in_background(background: bool) {
+    #[cfg(target_os = "ios")]
+    crate::client::APP_IN_BACKGROUND.store(background, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(target_os = "ios"))]
+    let _ = background;
+}
+
+/// This device's side of a connection for the mobile connection details: the NAT type it last
+/// tested and whether it holds a public IPv6 address.
+pub fn main_get_network_info() -> SyncReturn<String> {
+    SyncReturn(
+        serde_json::json!({
+            "nat_type": hbb_common::config::Config::get_nat_type(),
+            "ipv6": crate::common::has_public_ipv6(),
+        })
+        .to_string(),
+    )
+}
+
 pub fn main_set_local_option(key: String, value: String) {
     let is_texture_render_key = key.eq(keys::OPTION_TEXTURE_RENDER);
     let is_d3d_render_key = key.eq(keys::OPTION_ALLOW_D3D_RENDER);

@@ -485,6 +485,21 @@ impl Decoder {
                     0
                 };
         }
+        // Software HEVC and libaom AV1 cannot keep up with Retina-sized desktops
+        // on a phone, so HEVC is offered only when VideoToolbox decodes it.
+        #[cfg(target_os = "ios")]
+        {
+            #[cfg(feature = "hwcodec")]
+            let hevc_in_hardware = HwRamDecoder::try_get(CodecFormat::H265).map_or(false, |c| {
+                c.hwdevice != hwcodec::ffmpeg::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE
+            });
+            #[cfg(not(feature = "hwcodec"))]
+            let hevc_in_hardware = false;
+            if !hevc_in_hardware {
+                decoding.ability_h265 = 0;
+            }
+            decoding.ability_av1 = 0;
+        }
         for unsupported in mark_unsupported {
             match unsupported {
                 CodecFormat::VP8 => decoding.ability_vp8 = 0,
@@ -851,13 +866,12 @@ impl Decoder {
 pub fn enable_hwcodec_option() -> bool {
     use base::config::keys::OPTION_ENABLE_HWCODEC;
 
-    if !cfg!(target_os = "ios") {
-        return option2bool(
-            OPTION_ENABLE_HWCODEC,
-            &Config::get_option(OPTION_ENABLE_HWCODEC),
-        );
-    }
-    false
+    // iOS probes VideoToolbox in-process (see HwCodecConfig::get), so the
+    // option applies there too.
+    option2bool(
+        OPTION_ENABLE_HWCODEC,
+        &Config::get_option(OPTION_ENABLE_HWCODEC),
+    )
 }
 #[cfg(feature = "vram")]
 pub fn enable_vram_option(encode: bool) -> bool {
@@ -998,6 +1012,12 @@ pub fn codec_thread_num(limit: usize) -> usize {
     }
     res = std::cmp::min(res, max / 2);
     res = std::cmp::min(res, memory as usize / 2);
+    // iOS reports only free memory, which is usually below 4 GB, so the cap above
+    // leaves a single decode thread. The foreground app can use the spare cores.
+    #[cfg(target_os = "ios")]
+    {
+        res = std::cmp::max(res, std::cmp::min(4, max.saturating_sub(2)));
+    }
     //  Use common thread count
     res = match res {
         _ if res >= 64 => 64,

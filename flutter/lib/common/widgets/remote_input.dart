@@ -171,6 +171,7 @@ class _RawTouchGestureDetectorRegionState
           await inputModel.tapDown(MouseButtons.left);
         }
         await inputModel.tapUp(MouseButtons.left);
+        _mobileHaptic(HapticFeedback.selectionClick);
       }
     }
   }
@@ -192,6 +193,7 @@ class _RawTouchGestureDetectorRegionState
       }
       // Mobile, "Mouse mode"
       await inputModel.tap(MouseButtons.left);
+      _mobileHaptic(HapticFeedback.selectionClick);
     }
   }
 
@@ -278,6 +280,7 @@ class _RawTouchGestureDetectorRegionState
         }
       }
       await inputModel.tap(MouseButtons.right);
+      _mobileHaptic(HapticFeedback.mediumImpact);
     } else {
       // It's better to send a message to tell the controlled device that the long press event is triggered.
       // We're now using a `TimerTask` in `InputService.kt` to decide whether to trigger the long press event.
@@ -319,6 +322,7 @@ class _RawTouchGestureDetectorRegionState
         ffi.cursorModel.isInRemoteRect(_doubleFinerTapPosition);
     if (isMobileMouseMode || isDesktopInRemoteRect) {
       await inputModel.tap(MouseButtons.right);
+      _mobileHaptic(HapticFeedback.mediumImpact);
     }
   }
 
@@ -330,6 +334,7 @@ class _RawTouchGestureDetectorRegionState
     if (!handleTouch) {
       if (isSpecialHoldDragActive) return;
       await inputModel.sendMouse('down', MouseButtons.left);
+      _mobileHaptic(HapticFeedback.lightImpact);
     }
   }
 
@@ -488,7 +493,8 @@ class _RawTouchGestureDetectorRegionState
       }
     } else {
       // mobile
-      ffi.canvasModel.updateScale(d.scale / _scale, d.focalPoint);
+      // The canvas lives inside SafeArea, so anchor in local coordinates.
+      ffi.canvasModel.updateScale(d.scale / _scale, d.localFocalPoint);
       _scale = d.scale;
       ffi.canvasModel.panX(d.focalPointDelta.dx);
       ffi.canvasModel.panY(d.focalPointDelta.dy);
@@ -530,6 +536,11 @@ class _RawTouchGestureDetectorRegionState
           }
         };
 
+  /// Lets the user feel that a click or drag reached the remote screen.
+  void _mobileHaptic(Future<void> Function() feedback) {
+    if (isMobile) feedback();
+  }
+
   makeGestures(BuildContext context) {
     return <Type, GestureRecognizerFactory>{
       // Official
@@ -551,11 +562,14 @@ class _RawTouchGestureDetectorRegionState
       LongPressGestureRecognizer:
           GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
               () => LongPressGestureRecognizer(), (instance) {
+        // In mobile mouse mode a finger that rests before moving should keep
+        // moving the pointer; two-finger tap is the right click there.
+        final skip = isMobile && !ffiModel.touchMode;
         instance
-          ..onLongPressDown = onLongPressDown
-          ..onLongPressUp = onLongPressUp
-          ..onLongPress = onLongPress
-          ..onLongPressMoveUpdate = onLongPressMoveUpdate;
+          ..onLongPressDown = skip ? null : onLongPressDown
+          ..onLongPressUp = skip ? null : onLongPressUp
+          ..onLongPress = skip ? null : onLongPress
+          ..onLongPressMoveUpdate = skip ? null : onLongPressMoveUpdate;
       }),
       // Customized
       HoldTapMoveGestureRecognizer:

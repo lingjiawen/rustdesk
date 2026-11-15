@@ -292,5 +292,15 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("api_server_empty_tip", "With API Server empty, your custom server defaults to HTTP. Contact your administrator to enable HTTPS."),
         ("android-logs-folder-tip", "Choose Android → media to store log files."),
         ("install-directory-not-empty-tip", "The selected folder is not empty. Installation may delete existing data. Consider choosing a different folder."),
+        ("id-server-missing-tip", "No ID server is set, so connections will fail. Paste a config exported from a computer, scan its QR code, or enter it manually."),
+        ("touch-hint-drag", "Drag"),
+        ("touch-mode-chooser-title", "How do you want to control the screen?"),
+        ("touch-mode-chooser-mouse-1", "Like a laptop trackpad: your finger moves the pointer, a tap clicks."),
+        ("touch-mode-chooser-mouse-2", "Two-finger tap right-clicks, two fingers scroll. Best for precise work."),
+        ("touch-mode-chooser-touch-1", "Tap exactly where you want to click; a long press right-clicks."),
+        ("touch-mode-chooser-touch-2", "One finger scrolls. Best for browsing and simple clicks."),
+        ("touch-mode-chooser-tip", "You can switch any time from the floating button."),
+        ("touch-hint-right-click", "Release to right-click"),
+        ("id-server-key-missing-tip", "Key is empty. A self-hosted server will reply with Key mismatch."),
     ].iter().cloned().collect();
 }

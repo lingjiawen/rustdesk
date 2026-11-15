@@ -20,6 +20,9 @@ class _ScanPageState extends State<ScanPage> {
   QRViewController? controller;
   final GlobalKey qrKey = GlobalKey(debugLabel: 'QR');
   StreamSubscription? scanSubscription;
+  // The scanner reports the same code on every frame while it stays in view.
+  bool _handlingScan = false;
+  String? _lastRejectedCode;
 
   @override
   void reassemble() {
@@ -35,7 +38,7 @@ class _ScanPageState extends State<ScanPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Scan QR'),
+        title: Text(translate('Scan QR')),
         actions: [
           _buildImagePickerButton(),
           _buildFlashToggleButton(),
@@ -69,16 +72,27 @@ class _ScanPageState extends State<ScanPage> {
     setState(() {
       this.controller = controller;
     });
-    scanSubscription = controller.scannedDataStream.listen((scanData) {
-      if (scanData.code != null) {
-        showServerSettingFromQr(scanData.code!);
+    scanSubscription = controller.scannedDataStream.listen((scanData) async {
+      final code = scanData.code;
+      if (code == null || _handlingScan) return;
+      _handlingScan = true;
+      try {
+        if (code.startsWith(bind.mainUriPrefixSync())) {
+          await controller.pauseCamera();
+          if (mounted) Navigator.of(context).pop();
+          handleUriLink(uriString: code);
+        } else {
+          await showServerSettingFromQr(code);
+        }
+      } finally {
+        _handlingScan = false;
       }
     });
   }
 
   void _onPermissionSet(BuildContext context, QRViewController ctrl, bool p) {
     if (!p) {
-      showToast('No permission');
+      showToast(translate('No permission'));
     }
   }
 
@@ -103,7 +117,7 @@ class _ScanPageState extends State<ScanPage> {
           showServerSettingFromQr(result.text);
         }
       } catch (e) {
-        showToast('No QR code found');
+        showToast(translate('No QR code found'));
       }
     }
   }
@@ -146,20 +160,20 @@ class _ScanPageState extends State<ScanPage> {
     super.dispose();
   }
 
-  void showServerSettingFromQr(String data) async {
-    closeConnection();
-    await controller?.pauseCamera();
-    if (!data.startsWith('config=')) {
-      showToast('Invalid QR code');
+  /// Keeps scanning on an unrelated code; leaves the page only for a valid config.
+  Future<void> showServerSettingFromQr(String data) async {
+    final sc = tryDecodeServerConfig(data);
+    if (sc == null) {
+      if (data != _lastRejectedCode) {
+        _lastRejectedCode = data;
+        showToast(translate('Invalid QR code'));
+      }
       return;
     }
-    try {
-      final sc = ServerConfig.decode(data.substring(7));
-      Timer(Duration(milliseconds: 60), () {
-        showServerSettingsWithValue(sc, gFFI.dialogManager, null);
-      });
-    } catch (e) {
-      showToast('Invalid QR code');
-    }
+    await controller?.pauseCamera();
+    closeConnection();
+    Timer(Duration(milliseconds: 60), () {
+      showServerSettingsWithValue(sc, gFFI.dialogManager, null);
+    });
   }
 }

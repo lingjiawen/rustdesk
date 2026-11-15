@@ -417,6 +417,21 @@ class InputModel {
   var alt = false;
   var command = false;
 
+  /// Modifiers switched on from the mobile key bar without a long press.
+  /// Like the iOS Shift key, they apply to the next key or click only.
+  final Set<String> touchOneShotModifiers = {};
+  final RxInt touchModifiersChanged = 0.obs;
+
+  void consumeTouchOneShotModifiers() {
+    if (touchOneShotModifiers.isEmpty) return;
+    if (touchOneShotModifiers.contains('ctrl')) ctrl = false;
+    if (touchOneShotModifiers.contains('alt')) alt = false;
+    if (touchOneShotModifiers.contains('shift')) shift = false;
+    if (touchOneShotModifiers.contains('command')) command = false;
+    touchOneShotModifiers.clear();
+    touchModifiersChanged.value++;
+  }
+
   final ToReleaseRawKeys toReleaseRawKeys = ToReleaseRawKeys();
   final ToReleaseKeys toReleaseKeys = ToReleaseKeys();
   late final _localFlutterShortcuts = LocalFlutterShortcutDispatcher(
@@ -1351,6 +1366,7 @@ class InputModel {
         ctrl: ctrl,
         shift: shift,
         command: command);
+    if (!(down ?? false)) consumeTouchOneShotModifiers();
   }
 
   static Map<String, dynamic> getMouseEventMove() => {
@@ -1425,6 +1441,7 @@ class InputModel {
   /// Reset key modifiers to false, including [shift], [ctrl], [alt] and [command].
   void resetModifiers() {
     shift = ctrl = alt = command = false;
+    touchOneShotModifiers.clear();
     if (parent.target?.closed == true) _localFlutterShortcuts.clear();
   }
 
@@ -1451,6 +1468,7 @@ class InputModel {
     if (!keyboardPerm) return;
     if (isViewCamera) return;
     await _sendMouseUnchecked(type, button);
+    if (type == 'up') consumeTouchOneShotModifiers();
   }
 
   void enterOrLeave(bool enter) {
@@ -1695,6 +1713,45 @@ class InputModel {
             msg: '{"type": "trackpad", "x": "$x", "y": "$y"}');
       }
     }
+  }
+
+  /// Scroll from a touch gesture on a phone, sent like a trackpad scroll so
+  /// desktop peers get smooth pixel scrolling. [fingerDelta] follows the
+  /// finger, so the remote content moves with it.
+  void sendTouchScroll(Offset fingerDelta) {
+    if (isViewOnly || isViewCamera) return;
+    if (peerPlatform == kPeerPlatformAndroid) return;
+    _stopFling = true;
+    _flingTimer?.cancel();
+    final delta = _filterTrackpadDeltaAxis(fingerDelta * _trackpadSpeedInner);
+    _trackpadLastDelta = delta;
+    var x = delta.dx.toInt();
+    var y = delta.dy.toInt();
+    if (peerPlatform == kPeerPlatformLinux) {
+      _trackpadScrollUnsent += (delta * _trackpadAdjustPeerLinux);
+      x = _trackpadScrollUnsent.dx.truncate();
+      y = _trackpadScrollUnsent.dy.truncate();
+      _trackpadScrollUnsent -= Offset(x.toDouble(), y.toDouble());
+    }
+    if (x == 0 && y == 0) return;
+    bind.sessionSendMouse(
+        sessionId: sessionId, msg: '{"type": "trackpad", "x": "$x", "y": "$y"}');
+  }
+
+  /// Lets a touch scroll coast after the finger lifts, like a trackpad.
+  void endTouchScroll() {
+    if (isViewOnly || isViewCamera) return;
+    if (peerPlatform == kPeerPlatformAndroid) return;
+    _flingTimer?.cancel();
+    _stopFling = false;
+    final minFlingValue = 2.0 * _trackpadSpeedInner;
+    if (_trackpadLastDelta.dx.abs() > minFlingValue ||
+        _trackpadLastDelta.dy.abs() > minFlingValue) {
+      _fling = true;
+      _scheduleFling(
+          _trackpadLastDelta.dx, _trackpadLastDelta.dy, _flingBaseDelay);
+    }
+    _trackpadLastDelta = Offset.zero;
   }
 
   Offset _filterTrackpadDeltaAxis(Offset delta) {

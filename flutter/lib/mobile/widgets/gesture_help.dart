@@ -42,9 +42,12 @@ class GestureHelp extends StatefulWidget {
       required this.touchMode,
       required this.onTouchModeChange,
       required this.virtualMouseMode,
-      this.inputModel})
+      this.inputModel,
+      this.immediateTouch = false})
       : super(key: key);
   final bool touchMode;
+  /// Describe the immediate-tap gesture engine instead of the legacy one.
+  final bool immediateTouch;
   final OnTouchModeChange onTouchModeChange;
   final VirtualMouseMode virtualMouseMode;
   final InputModel? inputModel;
@@ -279,7 +282,9 @@ class _GestureHelpState extends State<GestureHelp> {
                     child: Wrap(
                   spacing: space,
                   runSpacing: 2 * space,
-                  children: _touchMode
+                  children: widget.immediateTouch
+                      ? _immediateGestures(width)
+                      : _touchMode
                       ? [
                           GestureInfo(
                               width,
@@ -320,8 +325,8 @@ class _GestureHelpState extends State<GestureHelp> {
                               translate("Left Mouse")),
                           GestureInfo(
                               width,
-                              GestureIcons.iconGesturePressHold,
-                              translate("One-Long Tap"),
+                              GestureIcons.iconGestureFdoubleTap,
+                              translate("Two-Finger Tap"),
                               translate("Right Mouse")),
                           GestureInfo(
                               width,
@@ -347,6 +352,38 @@ class _GestureHelpState extends State<GestureHelp> {
                 )),
               ],
             )));
+  }
+}
+
+extension on _GestureHelpState {
+  List<Widget> _immediateGestures(double width) {
+    GestureInfo info(IconData icon, String from, String to) =>
+        GestureInfo(width, icon, translate(from), translate(to));
+    if (_touchMode) {
+      return [
+        info(GestureIcons.iconMobileTouch, "One-Finger Tap", "Left Mouse"),
+        info(GestureIcons.iconGesturePressHold, "One-Long Tap", "Right Mouse"),
+        info(GestureIcons.iconGesturePress, "Hold & Move", "Mouse Drag"),
+        info(GestureIcons.iconGestureFSwipeRight, "One-Finger Move",
+            "Mouse Wheel"),
+        info(GestureIcons.iconGestureFdoubleTap, "Two-Finger Tap",
+            "Right Mouse"),
+        info(GestureIcons.iconGestureFDrag, "Two-Finger Move", "Canvas Move"),
+        info(GestureIcons.iconGesturePinch, "Pinch to Zoom", "Canvas Zoom"),
+      ];
+    }
+    return [
+      info(GestureIcons.iconMobileTouch, "One-Finger Tap", "Left Mouse"),
+      info(GestureIcons.iconGestureFdoubleTap, "Two-Finger Tap", "Right Mouse"),
+      info(GestureIcons.iconGestureFSwipeRight, "One-Finger Move",
+          "Mouse Move"),
+      info(GestureIcons.iconGesturePress, "Double Tap & Move", "Mouse Drag"),
+      info(GestureIcons.iconGesturePressHold, "Hold & Move", "Mouse Drag"),
+      info(GestureIcons.iconGestureFDrag, "Two-Finger Move", "Mouse Wheel"),
+      info(GestureIcons.iconGesturePinch, "Pinch to Zoom", "Canvas Zoom"),
+      info(GestureIcons.iconGestureFThreeFingers, "Three-Finger Tap",
+          "Middle Mouse"),
+    ];
   }
 }
 

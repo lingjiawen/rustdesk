@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/widgets/remote_input.dart';
@@ -30,6 +31,21 @@ final Color _kDefaultColor = Colors.black.withOpacity(0.4);
 final Color _kTapDownColor = Colors.blue.withOpacity(0.7);
 final Color _kWidgetHighlightColor = Colors.white.withOpacity(0.9);
 const int _kInputTimerIntervalMillis = 100;
+
+
+/// Size of the session body these widgets are laid out in. MediaQuery's size
+/// is the whole screen, which also covers the safe-area insets and the bottom
+/// bar, so positions computed from it can land off the visible body.
+Size sessionBodySize(BuildContext context) {
+  RenderObject? node = context.findRenderObject();
+  while (node != null && node is! RenderStack) {
+    node = node.parent;
+  }
+  if (node is RenderBox && node.hasSize) return node.size;
+  final view = MediaQueryData.fromView(View.of(context));
+  return Size(view.size.width - view.padding.horizontal,
+      view.size.height - view.padding.vertical);
+}
 
 class FloatingMouseWidgets extends StatefulWidget {
   final FFI ffi;
@@ -137,7 +153,7 @@ class _FloatingWheelState extends State<FloatingWheel> {
   }
 
   void _resetPosition() {
-    final size = MediaQuery.of(context).size;
+    final size = sessionBodySize(context);
     setState(() {
       _position = Offset(
         size.width - _wheelWidth - _kSpaceToHorizontalEdge,
@@ -468,7 +484,7 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
     final ps = bind.getLocalFlutterOption(k: _getPositionKey(ori));
     final pos = _loadPositionFromString(ps);
     if (pos == null) {
-      final size = MediaQuery.of(context).size;
+      final size = sessionBodySize(context);
       _position = Offset(_getOffsetX(size.width),
           size.height - _kSpaceToVerticalEdge - _kLeftRightButtonHeight);
     } else {
@@ -499,7 +515,7 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
 
   void _onMoveUpdateDelta(Offset delta) {
     final context = this.context;
-    final size = MediaQuery.of(context).size;
+    final size = sessionBodySize(context);
     Offset newPosition = _position + delta;
     double minX = _kSpaceToHorizontalEdge;
     double minY = _kSpaceToVerticalEdge;
@@ -761,7 +777,7 @@ class _VirtualJoystickState extends State<VirtualJoystick> {
   }
 
   void _resetPosition() {
-    final size = MediaQuery.of(context).size;
+    final size = sessionBodySize(context);
     setState(() {
       _position = Offset(
         _kSpaceToHorizontalEdge + _joystickRadius,

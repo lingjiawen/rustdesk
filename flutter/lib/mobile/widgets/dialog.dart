@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/widgets/api_server_warning.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
@@ -72,6 +73,21 @@ Future<bool> showServerSettings(OverlayDialogManager dialogManager,
   }
   return showServerSettingsWithValue(
       ServerConfig.fromOptions(options), dialogManager, setState);
+}
+
+/// Name for a profile saved without one: the ID server host, without a port.
+String _defaultServerProfileName(String idServer) {
+  var host = idServer.trim();
+  final scheme = host.indexOf('://');
+  if (scheme >= 0) host = host.substring(scheme + 3);
+  if (host.startsWith('[')) {
+    final end = host.indexOf(']');
+    if (end > 0) host = host.substring(1, end);
+  } else if (host.indexOf(':') == host.lastIndexOf(':')) {
+    final colon = host.indexOf(':');
+    if (colon > 0) host = host.substring(0, colon);
+  }
+  return host.replaceAll('@', '');
 }
 
 Future<bool> showServerSettingsWithValue(
@@ -158,6 +174,9 @@ Future<bool> showServerSettingsWithValue(
     }
 
     Future<bool> saveCurrent() async {
+      if (nameCtrl.text.trim().isEmpty) {
+        nameCtrl.text = _defaultServerProfileName(idCtrl.text);
+      }
       final name = nameCtrl.text.trim();
       final nameErr = ServerProfiles.validateName(name);
       if (nameErr != null) {
@@ -197,6 +216,9 @@ Future<bool> showServerSettingsWithValue(
           Expanded(child: Text(translate('ID/Relay Server'))),
           TextButton.icon(
             onPressed: () async {
+              if (nameCtrl.text.trim().isEmpty) {
+                nameCtrl.text = _defaultServerProfileName(idCtrl.text);
+              }
               final name = nameCtrl.text.trim();
               final hasBody = idCtrl.text.trim().isNotEmpty ||
                   relayCtrl.text.trim().isNotEmpty ||
@@ -215,7 +237,11 @@ Future<bool> showServerSettingsWithValue(
             icon: const Icon(Icons.add, size: 18),
             label: const Text('新增'),
           ),
-          ...ServerConfigImportExportWidgets(controllers, errMsgs),
+          // On a phone the unlabeled import icon is hard to find; it moves
+          // into the form as a labeled button, keeping only export here.
+          ...(isMobile
+              ? [ServerConfigImportExportWidgets(controllers, errMsgs).last]
+              : ServerConfigImportExportWidgets(controllers, errMsgs)),
         ],
       ),
       content: ConstrainedBox(
@@ -224,6 +250,19 @@ Future<bool> showServerSettingsWithValue(
               child: Obx(() => Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  if (isMobile)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        onPressed: () async {
+                          final data =
+                              await Clipboard.getData(Clipboard.kTextPlain);
+                          importConfig(controllers, errMsgs, data?.text);
+                        },
+                        icon: const Icon(Icons.content_paste, size: 18),
+                        label: Text(translate('Import server config')),
+                      ),
+                    ),
                   buildField('名称', nameCtrl, ''),
                   Align(
                     alignment: Alignment.centerLeft,
@@ -235,7 +274,7 @@ Future<bool> showServerSettingsWithValue(
                         bottom: 8,
                       ),
                       child: Text(
-                        '点右上角「新增」再加一台。名称用来区分，例如 auth',
+                        '点右上角「新增」再加一台。名称用来区分，留空时用服务器地址',
                         style: TextStyle(
                             fontSize: 12,
                             color: Theme.of(context).hintColor),

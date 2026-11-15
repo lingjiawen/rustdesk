@@ -8,6 +8,8 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse_widgets.dart';
 import 'package:flutter_hbb/mobile/widgets/gesture_help.dart';
+import 'package:flutter_hbb/mobile/widgets/touch_gesture_engine.dart';
+import 'package:flutter_hbb/mobile/widgets/session_panel.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_keyboard_visibility/flutter_keyboard_visibility.dart';
 import 'package:flutter_svg/svg.dart';
@@ -89,8 +91,13 @@ class RemotePage extends StatefulWidget {
 
 class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   Timer? _timer;
-  bool _showBar = !isWebDesktop;
+  // On iOS the floating ball opens every session control, so the bar starts
+  // hidden and the remote screen gets the full height.
+  bool _showBar = !isWebDesktop && !isIOS;
+  final _bottomBarKey = GlobalKey();
   bool _showGestureHelp = false;
+  // Forces landscape for this session, even with Portrait Orientation Lock on.
+  bool _landscapeLocked = false;
   String _value = '';
   Orientation? _currentOrientation;
   final _uniqueKey = UniqueKey();
@@ -166,6 +173,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         _registerMobileChatShortcut();
         registerToolbarShortcuts(context, widget.id, gFFI);
       }
+      if (mounted && _useTouchEngine) {
+        maybeShowTouchModeChooser(context, gFFI);
+      }
     });
     WidgetsBinding.instance.addObserver(this);
 
@@ -196,6 +206,12 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     // "Connecting...". Dispatching it here makes teardown happen synchronously on
     // pop; the `sessionClose` in `gFFI.close()` becomes a no-op once removed.
     unawaited(bind.sessionClose(sessionId: sessionId));
+    if (_iosBackgroundSince != null) {
+      unawaited(bind.mainSetAppInBackground(background: false));
+    }
+    if (_landscapeLocked) {
+      unawaited(SystemChrome.setPreferredOrientations([]));
+    }
     // https://github.com/flutter/flutter/issues/64935
     super.dispose();
     gFFI.dialogManager.hideMobileActionsOverlay(store: false);
@@ -227,6 +243,38 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       trySyncClipboard();
+    }
+    if (isIOS) _onIOSLifecycleChanged(state);
+  }
+
+  DateTime? _iosBackgroundSince;
+
+  /// iOS keeps the app alive for about 30 s in the background (see
+  /// SceneDelegate). Video is not decoded meanwhile. Back in time, a refresh
+  /// brings the picture up to date; later, the suspended connection is
+  /// replaced at once instead of waiting for it to time out.
+  void _onIOSLifecycleChanged(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+        if (_iosBackgroundSince != null) return;
+        _iosBackgroundSince = DateTime.now();
+        bind.mainSetAppInBackground(background: true);
+        break;
+      case AppLifecycleState.resumed:
+        final since = _iosBackgroundSince;
+        if (since == null) return;
+        _iosBackgroundSince = null;
+        bind.mainSetAppInBackground(background: false);
+        if (DateTime.now().difference(since) > const Duration(seconds: 28)) {
+          gFFI.ffiModel.reconnect(
+              gFFI.dialogManager, sessionId, widget.forceRelay ?? false);
+        } else {
+          sessionRefreshVideo(sessionId, gFFI.ffiModel.pi);
+        }
+        break;
+      default:
+        break;
     }
   }
 
@@ -349,12 +397,11 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     // 1. The composing range is valid
     // 2. The new string is shorter than the composing range.
     if (_textController.value.isComposingRangeValid) {
-      final composingLength = _textController.value.composing.end -
-          _textController.value.composing.start;
-      if (composingLength > newStr.length) {
-        _value = oldValue;
-        return;
-      }
+      // iOS only marks text while an input method (Pinyin, Kana, Hangul) is
+      // composing. Sending it would type the first letter and then erase it,
+      // so wait until the composition is committed.
+      _value = oldValue;
+      return;
     }
 
     // Delete the different part in the old value.
@@ -492,7 +539,8 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final keyboardIsVisible =
         keyboardVisibilityController.isVisible && _showEdit;
-    final showActionButton = !_showBar || keyboardIsVisible || _showGestureHelp;
+    final showActionButton =
+        (!_showBar && !isIOS) || keyboardIsVisible || _showGestureHelp;
 
     return WillPopScope(
       onWillPop: () async {
@@ -566,7 +614,8 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                               }
                               return Container(
                                 color: MyTheme.canvasColor,
-                                child: inputModel.isPhysicalMouse.value
+                                child: inputModel.isPhysicalMouse.value ||
+                                        _useTouchEngine
                                     ? getBodyForMobile()
                                     : RawTouchGestureDetectorRegion(
                                         child: getBodyForMobile(),
@@ -602,16 +651,63 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     );
   }
 
+  /// Shows or hides the bottom bar. On iOS the canvas is refit so the bar
+  /// does not cover the bottom of the remote screen.
+  void _setBarShown(bool show) {
+    setState(() => _showBar = show);
+    if (!isIOS) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      gFFI.canvasModel.mobileBottomBarHeight =
+          show ? (_bottomBarKey.currentContext?.size?.height ?? 0) : 0;
+      gFFI.canvasModel.updateViewStyle();
+    });
+  }
+
+  SessionPanelActions _panelActions() => SessionPanelActions(
+        openKeyboard: openKeyboard,
+        toggleTouchMode: () {
+          gFFI.ffiModel.toggleTouchMode();
+          bind.mainSetLocalOption(
+              key: kOptionTouchMode,
+              value: gFFI.ffiModel.touchMode ? 'Y' : 'N');
+        },
+        toggleLandscape: _toggleLandscape,
+        showGestureHelp: () => setState(() => _showGestureHelp = true),
+        toggleBar: () => _setBarShown(!_showBar),
+        openFileTransfer: () =>
+            connect(context, widget.id, isFileTransfer: true),
+        openChat: () => onPressedTextChat(widget.id),
+        showDisplayOptions: () =>
+            showOptions(context, widget.id, gFFI.dialogManager),
+        showMoreActions: () => showActions(widget.id),
+        disconnect: () => clientClose(sessionId, gFFI),
+        isLandscapeLocked: () => _landscapeLocked,
+        isBarShown: () => _showBar,
+      );
+
+  void _toggleLandscape() {
+    setState(() => _landscapeLocked = !_landscapeLocked);
+    SystemChrome.setPreferredOrientations(_landscapeLocked
+        ? [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]
+        : []);
+  }
+
   Widget getBottomAppBar() {
     final ffiModel = Provider.of<FfiModel>(context);
     return BottomAppBar(
+      key: _bottomBarKey,
       elevation: 10,
       color: MyTheme.accent,
       child: Row(
         mainAxisSize: MainAxisSize.max,
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: <Widget>[
-          Row(
+          // Scrolls instead of overflowing on 375 pt wide phones.
+          Flexible(
+              child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
               children: <Widget>[
                     IconButton(
                       color: Colors.white,
@@ -627,7 +723,15 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                         setState(() => _showEdit = false);
                         showOptions(context, widget.id, gFFI.dialogManager);
                       },
-                    )
+                    ),
+                    if (!isWeb)
+                      IconButton(
+                        color: Colors.white,
+                        icon: Icon(_landscapeLocked
+                            ? Icons.screen_lock_rotation
+                            : Icons.screen_rotation),
+                        onPressed: _toggleLandscape,
+                      ),
                   ] +
                   (isWebDesktop || ffiModel.viewOnly || !ffiModel.keyboard
                       ? []
@@ -686,20 +790,26 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                         showActions(widget.id);
                       },
                     ),
-                  ]),
+                  ]))),
           Obx(() => IconButton(
                 color: Colors.white,
                 icon: Icon(Icons.expand_more),
                 onPressed: gFFI.ffiModel.waitForFirstImage.isTrue
                     ? null
-                    : () {
-                        setState(() => _showBar = !_showBar);
-                      },
+                    : () => _setBarShown(!_showBar),
               )),
         ],
       ),
     );
   }
+
+  /// The immediate-tap gesture engine. Android peers, relative mouse mode and
+  /// the legacy option keep the original recognizers.
+  bool get _useTouchEngine =>
+      isIOS &&
+      !gFFI.ffiModel.isPeerAndroid &&
+      !gFFI.inputModel.relativeMouseMode.value &&
+      bind.mainGetLocalOption(key: kOptionLegacyTouchGestures) != 'Y';
 
   bool get showCursorPaint =>
       !gFFI.ffiModel.isPeerAndroid &&
@@ -710,8 +820,14 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     return Container(
         color: MyTheme.canvasColor,
         child: Stack(children: () {
+          // Cursor moves and overlay updates should not repaint the frame.
+          final image =
+              RepaintBoundary(child: ImagePaint(ffiModel: gFFI.ffiModel));
           final paints = [
-            ImagePaint(ffiModel: gFFI.ffiModel),
+            _useTouchEngine && !inputModel.isPhysicalMouse.value
+                ? Positioned.fill(
+                    child: TouchGestureLayer(ffi: gFFI, child: image))
+                : image,
             Positioned(
               top: 10,
               right: 10,
@@ -720,6 +836,8 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
             Obx(() {
               final chatKeyboardRequested =
                   gFFI.chatModel.softKeyboardRequested.value;
+              // Repaints the modifier keys after a one-shot modifier is used.
+              gFFI.inputModel.touchModifiersChanged.value;
               return KeyHelpTools(
                   keyboardIsVisible: keyboardVisibilityController.isVisible &&
                       (_showEdit || chatKeyboardRequested),
@@ -733,6 +851,10 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                   : TextFormField(
                       textInputAction: TextInputAction.newline,
                       autocorrect: false,
+                      // iOS would turn quotes and "--" into curly quotes and
+                      // dashes before they reach the remote terminal or code.
+                      smartQuotesType: SmartQuotesType.disabled,
+                      smartDashesType: SmartDashesType.disabled,
                       // Flutter 3.16.9 Android.
                       // `enableSuggestions` causes secure keyboard to be shown.
                       // https://github.com/flutter/flutter/issues/139143
@@ -767,6 +889,10 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
             paints.add(FloatingMouseWidgets(
               ffi: gFFI,
             ));
+          }
+          if (isIOS && !_showGestureHelp) {
+            paints.add(SessionFloatingBall(
+                ffi: gFFI, id: widget.id, actions: _panelActions()));
           }
           return paints;
         }()));
@@ -957,6 +1083,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
               },
               virtualMouseMode: gFFI.ffiModel.virtualMouseMode,
               inputModel: gFFI.inputModel,
+              immediateTouch: _useTouchEngine,
             )));
   }
 
@@ -1004,11 +1131,16 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
   InputModel get inputModel => gFFI.inputModel;
 
   Widget wrap(String text, void Function() onPressed,
-      {bool? active, IconData? icon}) {
+      {bool? active, IconData? icon, bool locked = false, VoidCallback? onLongPress}) {
     return TextButton(
+        onLongPress: onLongPress,
         style: TextButton.styleFrom(
-          minimumSize: Size(0, 0),
-          padding: EdgeInsets.symmetric(vertical: 10, horizontal: 9.75),
+          side: locked ? const BorderSide(color: Colors.white) : null,
+          // iOS asks for 44 pt touch targets.
+          minimumSize: isIOS ? const Size(44, 40) : Size(0, 0),
+          padding: isIOS
+              ? const EdgeInsets.symmetric(horizontal: 10)
+              : EdgeInsets.symmetric(vertical: 10, horizontal: 9.75),
           //adds padding inside the button
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           //limits the touch area to the button area
@@ -1018,9 +1150,9 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
           backgroundColor: active == true ? MyTheme.accent80 : null,
         ),
         child: icon != null
-            ? Icon(icon, size: 14, color: Colors.white)
+            ? Icon(icon, size: isIOS ? 20 : 14, color: Colors.white)
             : Text(translate(text),
-                style: TextStyle(color: Colors.white, fontSize: 11)),
+                style: TextStyle(color: Colors.white, fontSize: isIOS ? 14 : 11)),
         onPressed: onPressed);
   }
 
@@ -1057,19 +1189,40 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
     final isMac = pi.platform == kPeerPlatformMacOS;
     final isWin = pi.platform == kPeerPlatformWindows;
     final isLinux = pi.platform == kPeerPlatformLinux;
+    // Tap: applies to the next key or click only. Long press: stays on
+    // (shown with a border) until tapped again.
+    final oneShot = inputModel.touchOneShotModifiers;
+    Widget modifierKey(
+        String label, String name, bool value, void Function(bool) set) {
+      return wrap(label, () {
+        HapticFeedback.selectionClick();
+        setState(() {
+          set(!value);
+          if (value) {
+            oneShot.remove(name);
+          } else {
+            oneShot.add(name);
+          }
+        });
+      },
+          active: value,
+          locked: value && !oneShot.contains(name),
+          onLongPress: () {
+            HapticFeedback.mediumImpact();
+            setState(() {
+              set(true);
+              oneShot.remove(name);
+            });
+          });
+    }
+
     final modifiers = <Widget>[
-      wrap('Ctrl ', () {
-        setState(() => inputModel.ctrl = !inputModel.ctrl);
-      }, active: inputModel.ctrl),
-      wrap(' Alt ', () {
-        setState(() => inputModel.alt = !inputModel.alt);
-      }, active: inputModel.alt),
-      wrap('Shift', () {
-        setState(() => inputModel.shift = !inputModel.shift);
-      }, active: inputModel.shift),
-      wrap(isMac ? ' Cmd ' : ' Win ', () {
-        setState(() => inputModel.command = !inputModel.command);
-      }, active: inputModel.command),
+      modifierKey('Ctrl ', 'ctrl', inputModel.ctrl, (v) => inputModel.ctrl = v),
+      modifierKey(' Alt ', 'alt', inputModel.alt, (v) => inputModel.alt = v),
+      modifierKey(
+          'Shift', 'shift', inputModel.shift, (v) => inputModel.shift = v),
+      modifierKey(isMac ? ' Cmd ' : ' Win ', 'command', inputModel.command,
+          (v) => inputModel.command = v),
     ];
     final keys = <Widget>[
       wrap(
@@ -1187,6 +1340,39 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
     Future.delayed(Duration(milliseconds: 500), () {
       _updateRect();
     });
+    if (isIOS) {
+      // One scrollable row keeps most of the screen above the keyboard for the
+      // remote picture.
+      final row = <Widget>[
+        ...modifiers,
+        ...more.where((w) => w is! SizedBox),
+        ...fn.where((w) => w is! SizedBox),
+        wrap('', () async {
+          final data = await Clipboard.getData(Clipboard.kTextPlain);
+          final text = data?.text ?? '';
+          if (text.isEmpty) return;
+          bind.sessionInputString(sessionId: gFFI.sessionId, value: text);
+        }, icon: Icons.content_paste_go),
+        wrap('', () => setState(() => _pin = !_pin),
+            active: _pin, icon: Icons.push_pin),
+      ];
+      return Container(
+          key: _key,
+          color: Color(0xCC000000),
+          padding: EdgeInsets.only(
+              top: _keyboardVisibilityController.isVisible ? 24 : 4,
+              bottom: 4),
+          child: SizedBox(
+            height: 40,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              itemCount: row.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 4),
+              itemBuilder: (_, i) => row[i],
+            ),
+          ));
+    }
     return Container(
         key: _key,
         color: Color(0xAA000000),

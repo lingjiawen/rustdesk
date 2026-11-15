@@ -2336,6 +2336,10 @@ class CanvasModel with ChangeNotifier {
   static double get bottomToEdge =>
       isDesktop ? windowBorderWidth + kDragToResizeAreaPadding.bottom : 0;
 
+  /// Height of the session's bottom bar while it is shown (set on iOS), so
+  /// the fitted canvas ends above it instead of under it.
+  double mobileBottomBarHeight = 0;
+
   Size getSize() {
     final mediaData = MediaQueryData.fromView(ui.window);
     final size = mediaData.size;
@@ -2351,6 +2355,7 @@ class CanvasModel with ChangeNotifier {
           mediaData.viewInsets.bottom -
           (parent.target?.cursorModel.keyHelpToolsRectToAdjustCanvas?.bottom ??
               0);
+      h -= mobileBottomBarHeight;
       // Orientation-specific handling:
       //  - Portrait: additionally subtract top padding (e.g. status bar / notch)
       //  - Landscape: does not subtract mediaData.padding.top/bottom (home indicator auto-hides)

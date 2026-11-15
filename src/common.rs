@@ -734,6 +734,39 @@ pub fn test_nat_type() {
     });
 }
 
+/// test_nat_type runs once per launch, and a phone that has since moved between Wi-Fi and
+/// cellular would keep reporting the old network's result: a cellular SYMMETRIC sends the peer to
+/// relay on Wi-Fi, a Wi-Fi ASYMMETRIC sends it after a punch cellular cannot take. The stored
+/// result belongs to the address `local-ip-addr` it was measured from, so a connection leaving
+/// from another address measures again first.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub async fn nat_type_for_network(local_ip: std::net::IpAddr, stored: i32) -> i32 {
+    const RETEST_TIMEOUT_MS: u64 = 1500;
+    let measured_ip = Config::get_option("local-ip-addr").parse::<std::net::IpAddr>();
+    if measured_ip.ok() == Some(local_ip) {
+        return stored;
+    }
+    log::info!("Network changed since the last NAT test, testing again");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let ok = test_nat_type_().unwrap_or_else(|err| {
+            log::warn!("test nat: {}", err);
+            false
+        });
+        tx.send(ok).ok();
+    });
+    if matches!(timeout(RETEST_TIMEOUT_MS, rx).await, Ok(Ok(true))) {
+        return Config::get_nat_type();
+    }
+    // The stored type describes the network the phone left; unknown at least does not steer the
+    // peer wrong. A test still running writes the real type when it lands.
+    log::warn!("NAT test on the new network did not finish, reporting the NAT type as unknown");
+    if Config::get_nat_type() == stored {
+        Config::set_nat_type(NatType::UNKNOWN_NAT as _);
+    }
+    NatType::UNKNOWN_NAT as _
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn test_nat_type_() -> ResultType<bool> {
     log::info!("Testing nat ...");
@@ -3010,6 +3043,10 @@ fn test_ipv6_sync() {
         }
     }
     std::thread::spawn(func);
+}
+
+pub fn has_public_ipv6() -> bool {
+    PUBLIC_IPV6_ADDR.lock().unwrap().0.is_some()
 }
 
 pub async fn get_ipv6_socket() -> Option<(Arc<UdpSocket>, bytes::Bytes)> {

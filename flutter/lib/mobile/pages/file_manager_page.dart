@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_breadcrumb/flutter_breadcrumb.dart';
 import 'package:flutter_hbb/models/file_model.dart';
 import 'package:get/get.dart';
@@ -85,6 +87,48 @@ class _FileManagerPageState extends State<FileManagerPage> {
     } finally {
       gFFI.ffiModel.endAndroidDocumentPicker();
     }
+  }
+
+  /// iOS: copies photos or files picked by the user into the current local
+  /// folder, so they can be sent to the remote computer.
+  Future<void> _importIOSFiles({required bool photos}) async {
+    final controller = currentFileController;
+    final directory = currentDir.path;
+    final isWindows = currentOptions.isWindows;
+    FilePickerResult? result;
+    try {
+      result = await FilePicker.platform.pickFiles(
+          allowMultiple: true, type: photos ? FileType.media : FileType.any);
+    } catch (e) {
+      debugPrint('Failed to pick files: $e');
+    }
+    final files = result?.files ?? const <PlatformFile>[];
+    var imported = 0;
+    for (final f in files) {
+      final source = f.path;
+      if (source == null) continue;
+      var name = f.name;
+      var destination = PathUtil.join(directory, name, isWindows);
+      // Keep both copies instead of overwriting an existing file.
+      for (var i = 1; await File(destination).exists(); i++) {
+        final dot = f.name.lastIndexOf('.');
+        name = dot > 0
+            ? '${f.name.substring(0, dot)} ($i)${f.name.substring(dot)}'
+            : '${f.name} ($i)';
+        destination = PathUtil.join(directory, name, isWindows);
+      }
+      try {
+        await File(source).copy(destination);
+        imported++;
+      } catch (e) {
+        debugPrint('Failed to import ${f.name}: $e');
+      }
+    }
+    if (files.isEmpty) return;
+    await controller.refresh();
+    showToast(imported == files.length
+        ? translate('Successful')
+        : '${translate('Failed')}: ${files.length - imported}');
   }
 
   Future<void> _importFiles() async {
@@ -374,6 +418,31 @@ class _FileManagerPageState extends State<FileManagerPage> {
                       ),
                       const PopupMenuDivider(),
                     ],
+                    if (isIOS && showLocal && currentDir.path.isNotEmpty) ...[
+                      PopupMenuItem(
+                        value: 'ios_import_photos',
+                        child: Row(
+                          children: [
+                            Icon(Icons.photo_library_outlined,
+                                color: Theme.of(context).iconTheme.color),
+                            SizedBox(width: 5),
+                            Text(translate('Import from Photos')),
+                          ],
+                        ),
+                      ),
+                      PopupMenuItem(
+                        value: 'ios_import_files',
+                        child: Row(
+                          children: [
+                            Icon(Icons.file_open_outlined,
+                                color: Theme.of(context).iconTheme.color),
+                            SizedBox(width: 5),
+                            Text(translate('Import from Files')),
+                          ],
+                        ),
+                      ),
+                      const PopupMenuDivider(),
+                    ],
                     PopupMenuItem(
                       child: Row(
                         children: [
@@ -470,6 +539,9 @@ class _FileManagerPageState extends State<FileManagerPage> {
                     _changeLocalStorage(workspace: v == 'workspace');
                   } else if (v == "refresh") {
                     currentFileController.refresh();
+                  } else if (v == 'ios_import_photos' ||
+                      v == 'ios_import_files') {
+                    _importIOSFiles(photos: v == 'ios_import_photos');
                   } else if (v == "import") {
                     _importFiles();
                   } else if (v == "import_folder") {
@@ -655,10 +727,16 @@ class _FileManagerPageState extends State<FileManagerPage> {
 
       switch (activeJob.state) {
         case JobState.inProgress:
+          final name = activeJob.fileName.isNotEmpty
+              ? activeJob.fileName
+              : activeJob.jobName;
+          final shortName = name.split(RegExp(r'[\\/]')).last;
           return BottomSheetBody(
-            leading: CircularProgressIndicator(),
-            title: translate("Waiting"),
-            text: "${readableFileSize(activeJob.speed)}/s",
+            leading: CircularProgressIndicator(
+                value: activeJob.percent > 0 ? activeJob.percent : null),
+            title: shortName.isEmpty ? translate("Waiting") : shortName,
+            text:
+                "${activeJob.percentText} · ${readableFileSize(activeJob.speed)}/s",
             onCanceled: () {
               model.jobController.cancelJob(activeJob.id);
               jobTable.clear();
@@ -675,7 +753,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
           return BottomSheetBody(
             leading: Icon(Icons.error),
             title: "${translate("Error")}!",
-            text: "",
+            text: translate(activeJob.err),
             onCanceled: () => jobTable.clear(),
           );
         case JobState.none:
@@ -856,6 +934,10 @@ class _FileManagerViewState extends State<FileManagerView> {
                   }
                   if (entries[index].isDirectory || entries[index].isDrive) {
                     controller.openDirectory(entries[index].path);
+                  } else if (isIOS && isLocal) {
+                    // Quick Look, with Share for saving it elsewhere.
+                    const MethodChannel('rustdesk/ios_files').invokeMethod(
+                        'open_file', {'path': entries[index].path});
                   } else {
                     // Perform file-related tasks.
                   }

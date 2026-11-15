@@ -34,6 +34,7 @@ import 'mobile/pages/file_manager_page.dart';
 import 'mobile/pages/remote_page.dart';
 import 'mobile/pages/view_camera_page.dart';
 import 'mobile/pages/terminal_page.dart';
+import 'mobile/widgets/dialog.dart' as server_dialog;
 import 'desktop/pages/remote_page.dart' as desktop_remote;
 import 'desktop/pages/file_manager_page.dart' as desktop_file_manager;
 import 'desktop/pages/view_camera_page.dart' as desktop_view_camera;
@@ -2431,10 +2432,17 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
       if (!allowDeepLinkServerSettings) {
         debugPrint(
             "Ignore rustdesk://config because $kOptionAllowDeepLinkServerSettings is not enabled.");
-        // Keep the user-facing error generic; detailed rejection reason is in debug logs.
-        // Delay toast to avoid missing overlay during cold-start deeplink handling.
+        // A link must not switch servers silently, but it may pre-fill the
+        // dialog: nothing is saved until the user checks it and taps OK.
+        final linkConfig = tryDecodeServerConfig(uri.path.substring("/".length));
+        // Delay to avoid missing overlay during cold-start deeplink handling.
         Timer(Duration(seconds: 1), () {
-          showToast(translate('Failed'));
+          if (linkConfig == null) {
+            showToast(translate('Failed'));
+          } else {
+            server_dialog.showServerSettingsWithValue(
+                linkConfig, gFFI.dialogManager, null);
+          }
         });
         return null;
       }
@@ -3590,9 +3598,26 @@ class _CountDownButtonState extends State<_CountDownButton> {
   }
 }
 
+/// Decodes an exported server config, with or without the `config=` prefix
+/// that QR codes carry. Returns null when the text has no ID server.
+ServerConfig? tryDecodeServerConfig(String? text) {
+  var s = text?.trim() ?? '';
+  if (s.startsWith('config=')) s = s.substring('config='.length);
+  if (s.isEmpty) return null;
+  try {
+    final sc = ServerConfig.decode(s);
+    return sc.idServer.trim().isEmpty ? null : sc;
+  } catch (_) {
+    return null;
+  }
+}
+
 importConfig(List<TextEditingController>? controllers, List<RxString>? errMsgs,
     String? text) {
   text = text?.trim();
+  if (text != null && text.startsWith('config=')) {
+    text = text.substring('config='.length);
+  }
   if (text != null && text.isNotEmpty) {
     try {
       final sc = ServerConfig.decode(text);

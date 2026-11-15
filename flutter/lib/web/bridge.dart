@@ -986,6 +986,15 @@ class RustdeskImpl {
     ]);
   }
 
+  Future<void> mainSetAppInBackground(
+      {required bool background, dynamic hint}) {
+    return Future.value();
+  }
+
+  String mainGetNetworkInfo({dynamic hint}) {
+    return '{}';
+  }
+
   Future<void> mainSetLocalOption(
       {required String key, required String value, dynamic hint}) {
     return Future(() => js.context.callMethod('setByName', [
