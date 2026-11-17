@@ -1422,6 +1422,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
               initialKey: modeInitialKey,
               onChanged: (key) => model.setApproveMode(key),
             ).marginOnly(left: _kContentHMargin),
+            if (bind.mainIsInstalled()) silentMode(context, !locked),
             if (usePassword) radios[0],
             if (usePassword)
               _SubLabeledWidget(
@@ -1655,6 +1656,54 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
             }
           : null,
     ).marginOnly(left: _kCheckBoxLeftMargin);
+  }
+
+  Widget silentMode(BuildContext context, bool enabled) {
+    final isFixed = isOptionFixed('allow-hide-cm') ||
+        isOptionFixed(kOptionApproveMode) ||
+        isOptionFixed(kOptionVerificationMethod);
+    return ChangeNotifierProvider.value(
+        value: gFFI.serverModel,
+        child: Consumer<ServerModel>(builder: (context, model, child) {
+          onChanged(bool? b) async {
+            if (b == null) return;
+            if (b) {
+              final hasPermanent =
+                  (await bind.mainGetCommon(key: "permanent-password-set")) ==
+                      "true";
+              if (!hasPermanent) {
+                // Silent mode auto-accepts with the permanent password, so one
+                // must exist first, or no one could connect.
+                setPasswordDialog(
+                    notEmptyCallback: () => model.setSilentMode(true));
+                return;
+              }
+            }
+            await model.setSilentMode(b);
+          }
+
+          return GestureDetector(
+            onTap: enabled && !isFixed ? () => onChanged(!model.silentMode) : null,
+            child: Tooltip(
+              message: translate('silent-mode-tip'),
+              child: Row(
+                children: [
+                  Checkbox(
+                          value: model.silentMode,
+                          onChanged: enabled && !isFixed ? onChanged : null)
+                      .marginOnly(right: 5),
+                  Expanded(
+                    child: Text(
+                      translate('Silent mode'),
+                      style: TextStyle(
+                          color: disabledTextColor(context, enabled && !isFixed)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        })).marginOnly(left: _kContentHSubMargin - 6);
   }
 
   Widget hide_cm(bool enabled) {

@@ -998,9 +998,14 @@ async fn handle(data: Data, stream: &mut Connection) {
                         None
                     };
                 } else if name == "hide_cm" {
-                    value = if crate::hbbs_http::sync::is_pro() || crate::common::is_custom_client()
+                    // Honor an explicitly enabled silent/hidden mode on any build, not just
+                    // pro or renamed custom clients; otherwise keep the original gating.
+                    let hide = hbb_common::password_security::hide_cm();
+                    value = if hide
+                        || crate::hbbs_http::sync::is_pro()
+                        || crate::common::is_custom_client()
                     {
-                        Some(hbb_common::password_security::hide_cm().to_string())
+                        Some(hide.to_string())
                     } else {
                         None
                     };

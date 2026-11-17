@@ -116,6 +116,35 @@ class ServerModel with ChangeNotifier {
     */
   }
 
+  // Unattended "silent" mode: the permanent password auto-accepts every
+  // session and the connection window never shows, so the machine can be
+  // controlled with nothing appearing on its screen. Only for machines the
+  // operator owns or has consent to access. It is exactly the three settings
+  // `hide_cm()` already gates on, set together.
+  bool get silentMode =>
+      _approveMode == 'password' &&
+      _verificationMethod == kUsePermanentPassword &&
+      option2bool('allow-hide-cm', bind.mainGetOptionSync(key: 'allow-hide-cm'));
+
+  setSilentMode(bool enabled) async {
+    if (enabled) {
+      await bind.mainSetOption(key: kOptionApproveMode, value: 'password');
+      await bind.mainSetOption(
+          key: kOptionVerificationMethod, value: kUsePermanentPassword);
+      await bind.mainSetOption(
+          key: 'allow-hide-cm', value: bool2option('allow-hide-cm', true));
+    } else {
+      await bind.mainSetOption(
+          key: 'allow-hide-cm', value: bool2option('allow-hide-cm', false));
+      await bind.mainSetOption(
+          key: kOptionApproveMode, value: defaultOptionApproveMode);
+    }
+    _approveMode = await bind.mainGetOption(key: kOptionApproveMode);
+    _verificationMethod =
+        await bind.mainGetOption(key: kOptionVerificationMethod);
+    notifyListeners();
+  }
+
   bool get allowNumericOneTimePassword => _allowNumericOneTimePassword;
   switchAllowNumericOneTimePassword() async {
     await mainSetBoolOption(

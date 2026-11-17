@@ -880,6 +880,8 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Asymmetric NAT", "非对称型（可打洞）"),
         ("Symmetric NAT", "对称型（难打洞）"),
         ("Untested", "未检测"),
+        ("Silent mode", "隐藏模式（静默无人值守）"),
+        ("silent-mode-tip", "开启后用固定密码自动接受远程连接，被控端不弹出连接窗口、不显示任何提示。仅用于你本人拥有或已获授权的电脑；需先设置固定密码。"),
         ("Trackpad mode", "触控板模式"),
         ("Three-Finger Swipe", "三指轻扫"),
         ("Mission Control / Desktops", "调度中心 / 切换桌面"),
