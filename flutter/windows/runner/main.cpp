@@ -16,8 +16,9 @@ typedef char** (*FUNC_RUSTDESK_CORE_MAIN)(int*);
 typedef void (*FUNC_RUSTDESK_FREE_ARGS)( char**, int);
 typedef int (*FUNC_RUSTDESK_GET_APP_NAME)(wchar_t*, int);
 typedef int (*FUNC_RUSTDESK_IS_DISABLE_INSTALLATION)();
+typedef int (*FUNC_RUSTDESK_IS_SILENT_MODE)();
 /// Note: `--server`, `--service` are already handled in [core_main.rs].
-const std::vector<std::string> parameters_white_list = {"--install", "--cm"};
+const std::vector<std::string> parameters_white_list = {"--install", "--cm", "--silent-open"};
 
 const wchar_t* getWindowClassName();
 
@@ -91,6 +92,24 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     if (get_rustdesk_app_name(app_name_buffer, 512) == 0) {
       app_name = std::wstring(app_name_buffer);
     }
+  }
+
+  // In silent mode, only --silent-open (from the hotkey) can show the window
+  FUNC_RUSTDESK_IS_SILENT_MODE rustdesk_is_silent_mode =
+      (FUNC_RUSTDESK_IS_SILENT_MODE)GetProcAddress(hInstance, "rustdesk_is_silent_mode");
+  bool is_silent_mode = rustdesk_is_silent_mode && rustdesk_is_silent_mode() != 0;
+  if (is_silent_mode) {
+    bool has_silent_open = std::find(command_line_arguments.begin(),
+        command_line_arguments.end(), "--silent-open") != command_line_arguments.end();
+    if (!has_silent_open) {
+      return EXIT_SUCCESS;
+    }
+    // Remove --silent-open so Flutter doesn't see it
+    command_line_arguments.erase(
+        std::remove(command_line_arguments.begin(),
+                    command_line_arguments.end(),
+                    std::string("--silent-open")),
+        command_line_arguments.end());
   }
 
   // Uri links dispatch

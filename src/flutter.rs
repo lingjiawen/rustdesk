@@ -173,6 +173,12 @@ pub extern "C" fn rustdesk_is_disable_installation() -> c_int {
     hbb_common::config::is_disable_installation() as c_int
 }
 
+#[cfg(windows)]
+#[no_mangle]
+pub extern "C" fn rustdesk_is_silent_mode() -> c_int {
+    hbb_common::password_security::hide_cm() as c_int
+}
+
 // https://gist.github.com/iskakaushik/1c5b8aa75c77479c33c4320913eebef6
 #[cfg(windows)]
 fn rust_args_to_c_args(args: Vec<String>, outlen: *mut c_int) -> *mut *mut c_char {

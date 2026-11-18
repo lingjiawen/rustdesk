@@ -88,6 +88,8 @@ pub fn core_main() -> Option<CoreMainAction> {
                 _is_quick_support = true;
             } else if arg == "--no-server" {
                 no_server = true;
+            } else if arg == "--silent-open" {
+                // Consumed by the C++ launcher; ignore in Rust
             } else {
                 args.push(arg);
             }

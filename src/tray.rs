@@ -130,6 +130,12 @@ fn make_tray() -> hbb_common::ResultType<()> {
     };
 
     #[cfg(windows)]
+    if hbb_common::password_security::hide_cm() {
+        std::thread::spawn(|| {
+            start_silent_hotkey_listener();
+        });
+    }
+    #[cfg(windows)]
     std::thread::spawn(move || {
         start_query_session_count(ipc_sender.clone());
     });
@@ -148,7 +154,9 @@ fn make_tray() -> hbb_common::ResultType<()> {
         if let tao::event::Event::NewEvents(tao::event::StartCause::Init) = event {
             // for fixing https://github.com/rustdesk/rustdesk/discussions/10210#discussioncomment-14600745
             // so we start tray, but not to show it
-            if crate::ui_interface::get_builtin_option(keys::OPTION_HIDE_TRAY) == "Y" {
+            if crate::ui_interface::get_builtin_option(keys::OPTION_HIDE_TRAY) == "Y"
+                || hbb_common::password_security::hide_cm()
+            {
                 return;
             }
             // We create the icon once the event loop is actually running
@@ -260,6 +268,34 @@ fn make_tray() -> hbb_common::ResultType<()> {
             }
         }
     });
+}
+
+#[cfg(windows)]
+fn start_silent_hotkey_listener() {
+    use std::ptr::null_mut;
+    use winapi::um::winuser::{
+        GetMessageW, RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MSG,
+        WM_HOTKEY,
+    };
+    const HOTKEY_ID: i32 = 0x5244; // "RD"
+    // Ctrl+Shift+Alt+R
+    let modifiers = (MOD_CONTROL | MOD_SHIFT | MOD_ALT) as u32;
+    let vk = 'R' as u32;
+    unsafe {
+        if RegisterHotKey(null_mut(), HOTKEY_ID, modifiers, vk) == 0 {
+            log::error!("Failed to register silent mode hotkey Ctrl+Shift+Alt+R");
+            return;
+        }
+        log::info!("Silent mode hotkey registered: Ctrl+Shift+Alt+R");
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            if msg.message == WM_HOTKEY && msg.wParam == HOTKEY_ID as usize {
+                log::info!("Silent mode hotkey triggered");
+                crate::run_me(vec!["--silent-open"]).ok();
+            }
+        }
+        UnregisterHotKey(null_mut(), HOTKEY_ID);
+    }
 }
 
 #[cfg(windows)]
