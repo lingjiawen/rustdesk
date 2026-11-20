@@ -222,6 +222,12 @@ exclude = ["vdi/host"]
 
 # Patch libxdo-sys to use a stub implementation that doesn't require libxdo
 # This allows building and running on systems without libxdo installed (e.g., Wayland-only)
+# A copy of the crate at the revision the lock file had, with two additions upstream has no
+# entry point for: asking the encoder for a key frame, and handing out a decoded frame without
+# downloading it from the GPU.
+[patch."https://github.com/rustdesk-org/hwcodec"]
+hwcodec = { path = "libs/hwcodec" }
+
 [patch.crates-io]
 libxdo-sys = { path = "libs/libxdo-sys-stub" }
 # Upstream reserves a frame's whole declared length as soon as its header is in, so a header alone
