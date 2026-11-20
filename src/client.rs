@@ -2757,6 +2757,8 @@ pub struct VideoHandler {
     _display: usize, // useful for debug
     fail_counter: usize,
     first_frame: bool,
+    #[cfg(target_os = "ios")]
+    recovery: helper::DecoderRecovery,
 }
 
 impl VideoHandler {
@@ -2789,6 +2791,8 @@ impl VideoHandler {
             _display,
             fail_counter: 0,
             first_frame: true,
+            #[cfg(target_os = "ios")]
+            recovery: Default::default(),
         }
     }
 
@@ -2815,6 +2819,8 @@ impl VideoHandler {
                 );
                 if res.as_ref().is_ok_and(|x| *x) {
                     self.fail_counter = 0;
+                    #[cfg(target_os = "ios")]
+                    self.recovery.on_success();
                 } else {
                     if self.fail_counter < usize::MAX {
                         if self.first_frame && self.fail_counter < MAX_DECODE_FAIL_COUNTER {
@@ -4188,12 +4194,17 @@ pub fn start_video_thread<F, T>(
                             let format_changed = handler.decoder.format() != format;
                             match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
                                 Ok(true) => {
+                                    #[cfg(target_os = "ios")]
+                                    let decoded = start.elapsed();
                                     video_callback(
                                         display,
                                         &mut handler.rgb,
                                         handler.texture.texture,
                                         pixelbuffer,
                                     );
+                                    #[cfg(target_os = "ios")]
+                                    helper::FRAME_STAGES
+                                        .record(decoded, start.elapsed().saturating_sub(decoded));
 
                                     // chroma
                                     if tmp_chroma.is_some() && last_chroma != tmp_chroma {
@@ -4232,6 +4243,23 @@ pub fn start_video_thread<F, T>(
                                     session.refresh_video(display as _);
                                 }
                                 _ => {}
+                            }
+                        }
+
+                        #[cfg(target_os = "ios")]
+                        if let Some(handler) = video_handler.as_mut() {
+                            if handler.decoder.valid()
+                                && handler.fail_counter >= MAX_DECODE_FAIL_COUNTER
+                            {
+                                match handler.recovery.on_failure(std::time::Instant::now()) {
+                                    helper::DecoderRecoveryStep::Restart => {
+                                        log::info!("decoder keeps failing, starting it over");
+                                        handler.reset(None);
+                                        session.refresh_video(display as _);
+                                    }
+                                    helper::DecoderRecoveryStep::Wait => handler.fail_counter = 0,
+                                    helper::DecoderRecoveryStep::GiveUp => {}
+                                }
                             }
                         }
 

@@ -99,6 +99,8 @@ pub struct Remote<T: InvokeUiSession> {
     peer_info: ParsedPeerInfo,
     video_threads: HashMap<usize, VideoThread>,
     last_auto_fps: Option<usize>,
+    #[cfg(target_os = "ios")]
+    saved_jobs: Option<TransferSerde>,
     chroma: Arc<RwLock<Option<Chroma>>>,
     last_record_state: bool,
     sent_close_reason: bool,
@@ -153,6 +155,8 @@ impl<T: InvokeUiSession> Remote<T> {
             peer_info: Default::default(),
             video_threads: Default::default(),
             last_auto_fps: None,
+            #[cfg(target_os = "ios")]
+            saved_jobs: None,
             chroma: Default::default(),
             last_record_state: false,
             sent_close_reason: false,
@@ -391,6 +395,8 @@ impl<T: InvokeUiSession> Remote<T> {
                                 continue;
                             }
                             fps_instant = Instant::now();
+                            #[cfg(target_os = "ios")]
+                            self.save_jobs_on_change();
                             let mut speed = self.data_count.swap(0, Ordering::Relaxed);
                             speed = speed * 1000 / elapsed as usize;
                             let speed = format!("{:.2}kB/s", speed as f32 / 1024 as f32);
@@ -415,11 +421,17 @@ impl<T: InvokeUiSession> Remote<T> {
                             } else {
                                 Some(self.video_format.clone())
                             };
+                            #[cfg(target_os = "ios")]
+                            let stages = crate::client::helper::FRAME_STAGES.take();
                             self.handler.update_quality_status(QualityStatus {
                                 speed: Some(speed),
                                 fps,
                                 chroma,
                                 codec_format,
+                                #[cfg(target_os = "ios")]
+                                decode_ms: stages.map(|s| s.0),
+                                #[cfg(target_os = "ios")]
+                                present_ms: stages.map(|s| s.1),
                                 ..Default::default()
                             });
                         }
@@ -1454,8 +1466,47 @@ impl<T: InvokeUiSession> Remote<T> {
         self.remove_jobs.remove(&id);
     }
 
+    // iOS suspends the app without notice and may end it afterwards, so the jobs cannot wait
+    // for the session to close to be saved.
+    #[cfg(target_os = "ios")]
+    fn save_jobs_on_change(&mut self) {
+        if !self.is_connected || !self.handler.is_file_transfer() {
+            return;
+        }
+        let mut metas = TransferSerde::default();
+        for job in self.read_jobs.iter() {
+            metas
+                .read_jobs
+                .push(serde_json::to_string(&job.gen_meta()).unwrap_or_default());
+        }
+        for job in self.write_jobs.iter() {
+            metas
+                .write_jobs
+                .push(serde_json::to_string(&job.gen_meta()).unwrap_or_default());
+        }
+        // Until this session has jobs of its own, the saved ones are those it has yet to load.
+        if self.saved_jobs.is_none() && metas == TransferSerde::default() {
+            return;
+        }
+        if self.saved_jobs.as_ref() == Some(&metas) {
+            return;
+        }
+        let mut config: PeerConfig = self.handler.load_config();
+        if config.transfer != metas {
+            config.transfer = metas.clone();
+            self.handler.save_config(config);
+        }
+        self.saved_jobs = Some(metas);
+    }
+
     pub async fn sync_jobs_status_to_local(&mut self) -> bool {
         if !self.is_connected {
+            return false;
+        }
+        // A remote control session has no jobs, and would erase the ones a file transfer
+        // session saved for the same peer.
+        #[cfg(target_os = "ios")]
+        if !self.handler.is_file_transfer() {
             return false;
         }
         let mut config: PeerConfig = self.handler.load_config();
@@ -1585,6 +1636,12 @@ impl<T: InvokeUiSession> Remote<T> {
         if limited_fps > custom_fps {
             limited_fps = custom_fps;
         }
+        #[cfg(target_os = "ios")]
+        let decode_limited_fps = limited_fps;
+        #[cfg(target_os = "ios")]
+        if let Some(ui_fps) = self.handler.ui_fps() {
+            limited_fps = limited_fps.min((ui_fps * 9 / 10).max(1));
+        }
         let last_auto_fps = self.last_auto_fps;
         let displays = self.video_threads.keys().cloned().collect::<Vec<_>>();
         let mut fps_trending = |display: usize| {
@@ -1614,6 +1671,12 @@ impl<T: InvokeUiSession> Remote<T> {
         let trendings: Vec<_> = displays.iter().map(|k| fps_trending(*k)).collect();
         let should_decrease = trendings.iter().any(|v| *v == Some(false));
         let should_increase = !should_decrease && trendings.iter().any(|v| *v == Some(true));
+        // When it is the UI that falls behind, frames are dropped after decoding and the
+        // queue stays short, so nothing above asks for less.
+        #[cfg(target_os = "ios")]
+        let should_decrease = should_decrease
+            || limited_fps < decode_limited_fps
+                && last_auto_fps.map_or(false, |fps| fps > limited_fps + 3);
         if last_auto_fps.is_none() || should_decrease || should_increase {
             // limited_fps to ensure decoding is faster than encoding
             let mut auto_fps = limited_fps;

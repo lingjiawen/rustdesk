@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -5,10 +6,19 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../common.dart';
+import '../../common/shared_state.dart';
+import '../../common/widgets/dialog.dart';
 import '../../common/widgets/toolbar.dart';
 import '../../consts.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
+import 'background_keep_alive.dart';
+import 'panel_quick_actions.dart';
+import 'phone_resolution.dart';
+import 'session_recording.dart';
+import 'session_screenshot.dart';
+import 'session_video_texture.dart';
+import 'touch_gesture_engine.dart';
 
 /// A key combination sent to the remote computer from the session panel.
 class SessionShortcut {
@@ -193,6 +203,12 @@ void sendSessionShortcut(FFI ffi, SessionShortcut s) {
 class SessionPanelActions {
   SessionPanelActions({
     required this.openKeyboard,
+    required this.openFnPad,
+    required this.sendText,
+    required this.toggleKeyboard,
+    required this.controls,
+    required this.toggleGameKeys,
+    required this.toggleRecording,
     required this.toggleTouchMode,
     required this.toggleLandscape,
     required this.showGestureHelp,
@@ -200,13 +216,30 @@ class SessionPanelActions {
     required this.openFileTransfer,
     required this.openChat,
     required this.showDisplayOptions,
-    required this.showMoreActions,
     required this.disconnect,
     required this.isLandscapeLocked,
     required this.isBarShown,
+    required this.isGameKeysShown,
+    required this.isRecording,
+    this.videoTexture,
   });
 
+  /// Null where the session's video cannot go through a native texture.
+  final SessionVideoTexture? videoTexture;
+
   final VoidCallback openKeyboard;
+  final VoidCallback openFnPad;
+  final VoidCallback sendText;
+
+  /// Opens the soft keyboard, or closes whichever of it and the function-key
+  /// pad is open.
+  final VoidCallback toggleKeyboard;
+
+  /// The session's remaining actions, built with the session page's context
+  /// so they still work after the panel has closed.
+  final List<TTextMenu> Function() controls;
+  final VoidCallback toggleGameKeys;
+  final VoidCallback toggleRecording;
   final VoidCallback toggleTouchMode;
   final VoidCallback toggleLandscape;
   final VoidCallback showGestureHelp;
@@ -214,22 +247,30 @@ class SessionPanelActions {
   final VoidCallback openFileTransfer;
   final VoidCallback openChat;
   final VoidCallback showDisplayOptions;
-  final VoidCallback showMoreActions;
   final VoidCallback disconnect;
   final bool Function() isLandscapeLocked;
   final bool Function() isBarShown;
+  final bool Function() isGameKeysShown;
+  final bool Function() isRecording;
 }
 
 /// A draggable, semi-transparent button that opens the session panel. It
 /// rests on the nearest side edge so it covers as little as possible.
 class SessionFloatingBall extends StatefulWidget {
   const SessionFloatingBall(
-      {Key? key, required this.ffi, required this.id, required this.actions})
+      {Key? key,
+      required this.ffi,
+      required this.id,
+      required this.actions,
+      this.bottomReserved = 0})
       : super(key: key);
 
   final FFI ffi;
   final String id;
   final SessionPanelActions actions;
+
+  /// Height at the bottom the ball must stay above, e.g. the key bar.
+  final double bottomReserved;
 
   @override
   State<SessionFloatingBall> createState() => _SessionFloatingBallState();
@@ -238,10 +279,38 @@ class SessionFloatingBall extends StatefulWidget {
 class _SessionFloatingBallState extends State<SessionFloatingBall> {
   static const double _size = 46;
   static const double _margin = 6;
-  // Remembered for the app's lifetime, as fractions of the canvas.
-  static Offset _fraction = const Offset(1, 0.4);
+  static const _idleAfter = Duration(seconds: 4);
+  // The side it rests on and how far down, as fractions of the canvas.
+  static Offset? _saved;
   Offset? _dragPos;
   bool _active = false;
+  bool _idle = false;
+  Timer? _idleTimer;
+
+  Offset get _fraction => _saved ??= parseBallPosition(
+      bind.mainGetLocalOption(key: kOptionMobileBallPosition));
+
+  @override
+  void initState() {
+    super.initState();
+    _wake();
+  }
+
+  @override
+  void dispose() {
+    _idleTimer?.cancel();
+    super.dispose();
+  }
+
+  /// Fades the ball once it has been left alone, so it hides less of the
+  /// remote screen.
+  void _wake() {
+    _idleTimer?.cancel();
+    _idle = false;
+    _idleTimer = Timer(_idleAfter, () {
+      if (mounted) setState(() => _idle = true);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -250,7 +319,8 @@ class _SessionFloatingBallState extends State<SessionFloatingBall> {
         final w = constraints.maxWidth;
         final h = constraints.maxHeight;
         final maxX = max(_margin, w - _size - _margin);
-        final maxY = max(_margin, h - _size - _margin);
+        final maxY =
+            max(_margin, h - _size - _margin - widget.bottomReserved);
         final pos = _dragPos ??
             Offset(_margin + (maxX - _margin) * _fraction.dx,
                 _margin + (maxY - _margin) * _fraction.dy);
@@ -259,8 +329,17 @@ class _SessionFloatingBallState extends State<SessionFloatingBall> {
             left: pos.dx.clamp(_margin, maxX),
             top: pos.dy.clamp(_margin, maxY),
             child: GestureDetector(
-              onTap: () => _openPanel(context),
+              onTap: () {
+                setState(_wake);
+                _openPanel(context);
+              },
+              onLongPress: () {
+                HapticFeedback.mediumImpact();
+                setState(_wake);
+                widget.actions.toggleKeyboard();
+              },
               onPanStart: (_) => setState(() {
+                _wake();
                 _active = true;
                 _dragPos = pos;
               }),
@@ -272,13 +351,18 @@ class _SessionFloatingBallState extends State<SessionFloatingBall> {
                 final toRight = p.dx + _size / 2 > w / 2;
                 final y = ((p.dy - _margin) / max(1, maxY - _margin))
                     .clamp(0.0, 1.0);
-                _fraction = Offset(toRight ? 1 : 0, y);
+                final fraction = Offset(toRight ? 1 : 0, y);
+                _saved = fraction;
+                bind.mainSetLocalOption(
+                    key: kOptionMobileBallPosition,
+                    value: formatBallPosition(fraction));
                 _dragPos = null;
                 _active = false;
+                _wake();
               }),
               child: AnimatedOpacity(
-                duration: const Duration(milliseconds: 150),
-                opacity: _active ? 0.95 : 0.6,
+                duration: const Duration(milliseconds: 250),
+                opacity: _active ? 0.95 : (_idle ? 0.3 : 0.6),
                 child: Container(
                   width: _size,
                   height: _size,
@@ -312,6 +396,94 @@ class _SessionFloatingBallState extends State<SessionFloatingBall> {
   }
 }
 
+/// Frame rates offered in the panel.
+const kSessionFpsChoices = [30, 60, 120];
+
+/// The rates worth asking for on a screen that refreshes [refreshRate] times a
+/// second, 0 when that is unknown. Frames the screen cannot show are sent and
+/// decoded for nothing.
+List<int> sessionFpsChoices(double refreshRate) => [
+      for (final fps in kSessionFpsChoices)
+        if (fps <= 60 || refreshRate <= 0 || fps <= refreshRate + 1) fps
+    ];
+
+/// The refresh rate of the screen the app is on, 0 when unknown.
+double screenRefreshRate() {
+  final views = WidgetsBinding.instance.platformDispatcher.views;
+  return views.isEmpty ? 0 : views.first.display.refreshRate;
+}
+
+/// Brings a saved frame rate that the screen cannot show down to one it can.
+Future<void> capSessionFpsToScreen(FFI ffi) async {
+  final sessionId = ffi.sessionId;
+  final quality = await bind.sessionGetImageQuality(sessionId: sessionId);
+  if (quality != kRemoteImageQualityCustom) return;
+  final saved = parseSessionFps(
+      await bind.sessionGetOption(sessionId: sessionId, arg: 'custom-fps'));
+  final most = sessionFpsChoices(screenRefreshRate()).last;
+  if (saved > most) {
+    await bind.sessionSetCustomFps(sessionId: sessionId, fps: most);
+  }
+}
+
+/// What to give up first when the connection cannot carry everything.
+///
+/// The remote side lowers the bitrate before the frame rate, and how far it
+/// lets the bitrate drop depends on the image quality asked for: least for
+/// the best quality, most for the low one. The modes are the two ends of that.
+enum SessionMode { speed, hd }
+
+/// The mode the settings amount to, if any.
+SessionMode? sessionModeOf(String? quality, int customQuality) {
+  final preset = quality == kRemoteImageQualityCustom
+      ? presetForCustomQuality(customQuality)
+      : quality;
+  if (preset == kRemoteImageQualityBest) return SessionMode.hd;
+  if (preset == kRemoteImageQualityLow) return SessionMode.speed;
+  return null;
+}
+
+/// The frame rate the modes ask for.
+int sessionModeFps(double refreshRate) =>
+    sessionFpsChoices(refreshRate).lastWhere((fps) => fps <= 60);
+
+/// The custom quality that asks the remote for the same bitrate as a preset.
+/// The remote takes a custom quality of 50 as the bitrate ratio 1, and its
+/// presets are the ratios 0.5, 0.67 and 1.5.
+int customQualityForPreset(String preset) => switch (preset) {
+      kRemoteImageQualityLow => 25,
+      kRemoteImageQualityBest => 75,
+      _ => 34,
+    };
+
+String presetForCustomQuality(int quality) => quality < 30
+    ? kRemoteImageQualityLow
+    : (quality < 55 ? kRemoteImageQualityBalanced : kRemoteImageQualityBest);
+
+/// Reads the saved `custom-fps` option as the nearest rate on offer.
+int parseSessionFps(String? value) {
+  final fps = int.tryParse(value ?? '') ?? kDefaultFps.toInt();
+  return kSessionFpsChoices.reduce(
+      (a, b) => (a - fps).abs() <= (b - fps).abs() ? a : b);
+}
+
+const kOptionMobileBallPosition = 'mobile-ball-position';
+
+/// Reads a saved ball position: the side (0 left, 1 right) and how far down
+/// (0 to 1). Anything unreadable gives the default, right side above centre.
+Offset parseBallPosition(String value) {
+  const fallback = Offset(1, 0.4);
+  final parts = value.split(',');
+  if (parts.length != 2) return fallback;
+  final x = double.tryParse(parts[0]);
+  final y = double.tryParse(parts[1]);
+  if (x == null || y == null || !x.isFinite || !y.isFinite) return fallback;
+  return Offset(x < 0.5 ? 0 : 1, y.clamp(0.0, 1.0));
+}
+
+String formatBallPosition(Offset fraction) =>
+    '${fraction.dx.round()},${fraction.dy.toStringAsFixed(3)}';
+
 class SessionPanel extends StatefulWidget {
   const SessionPanel(
       {Key? key, required this.ffi, required this.id, required this.actions})
@@ -330,15 +502,160 @@ class _SessionPanelState extends State<SessionPanel> {
   bool _showDetails = false;
   List<SessionShortcut> _custom = loadCustomShortcuts();
   Future<List<TToggleMenu>>? _toggles;
+  List<TTextMenu> _controls = const [];
+  double _pointerSpeed = loadPointerSpeed();
+  List<PanelActionEntry> _actionOrder = parsePanelActions(
+      bind.mainGetLocalOption(key: kOptionMobilePanelActions));
+  int _customQuality = 0;
+  int _fps = kDefaultFps.toInt();
+  bool _fpsAllowed = false;
+  bool? _customOpen;
+
+  /// The quality and frame rate chips. A mode sets both, so they stay folded
+  /// away until asked for, or while the settings are no mode's.
+  bool get _showQualityDetails =>
+      _customOpen ??
+      (_quality != null && sessionModeOf(_quality, _customQuality) == null);
 
   FFI get ffi => widget.ffi;
 
   @override
   void initState() {
     super.initState();
-    bind.sessionGetImageQuality(sessionId: ffi.sessionId).then((v) {
-      if (mounted) setState(() => _quality = v);
+    _controls = widget.actions.controls();
+    _loadQuality();
+  }
+
+  Future<void> _loadQuality() async {
+    final sessionId = ffi.sessionId;
+    final quality = await bind.sessionGetImageQuality(sessionId: sessionId);
+    var custom = 0;
+    var fps = kDefaultFps.toInt();
+    if (quality == kRemoteImageQualityCustom) {
+      final values =
+          await bind.sessionGetCustomImageQuality(sessionId: sessionId);
+      custom = values == null || values.isEmpty ? 50 : values[0];
+      fps = parseSessionFps(
+          await bind.sessionGetOption(sessionId: sessionId, arg: 'custom-fps'));
+    }
+    // The same limits as the custom image quality dialog.
+    final allowed = versionCmp(ffi.ffiModel.pi.version, '1.2.2') >= 0 &&
+        !(await bind.mainIsUsingPublicServer() && ffi.ffiModel.direct != true);
+    if (!mounted) return;
+    setState(() {
+      _quality = quality;
+      _customQuality = custom;
+      _fps = fps;
+      _fpsAllowed = allowed;
     });
+  }
+
+  /// The preset whose chip is lit; a custom quality lights the nearest one.
+  String? get _preset => _quality == kRemoteImageQualityCustom
+      ? presetForCustomQuality(_customQuality)
+      : _quality;
+
+  /// A preset always runs at the default frame rate on the remote, so any
+  /// other rate is asked for as a custom quality of the same bitrate.
+  Future<void> _setQuality(String preset) async {
+    final sessionId = ffi.sessionId;
+    if (_fps == kDefaultFps || !_fpsAllowed) {
+      await bind.sessionSetImageQuality(sessionId: sessionId, value: preset);
+      if (mounted) setState(() => _quality = preset);
+      return;
+    }
+    final custom = customQualityForPreset(preset);
+    await bind.sessionSetImageQuality(
+        sessionId: sessionId, value: kRemoteImageQualityCustom);
+    await bind.sessionSetCustomImageQuality(sessionId: sessionId, value: custom);
+    await bind.sessionSetCustomFps(sessionId: sessionId, fps: _fps);
+    if (!mounted) return;
+    setState(() {
+      _quality = kRemoteImageQualityCustom;
+      _customQuality = custom;
+    });
+  }
+
+  Future<void> _setMode(SessionMode mode) async {
+    final sessionId = ffi.sessionId;
+    final preset = mode == SessionMode.hd
+        ? kRemoteImageQualityBest
+        : kRemoteImageQualityLow;
+    if (!_fpsAllowed) {
+      await bind.sessionSetImageQuality(sessionId: sessionId, value: preset);
+      if (!mounted) return;
+      setState(() {
+        _quality = preset;
+        _fps = kDefaultFps.toInt();
+      });
+      return;
+    }
+    final custom = customQualityForPreset(preset);
+    final fps = sessionModeFps(screenRefreshRate());
+    await bind.sessionSetImageQuality(
+        sessionId: sessionId, value: kRemoteImageQualityCustom);
+    await bind.sessionSetCustomImageQuality(sessionId: sessionId, value: custom);
+    await bind.sessionSetCustomFps(sessionId: sessionId, fps: fps);
+    if (!mounted) return;
+    setState(() {
+      _quality = kRemoteImageQualityCustom;
+      _customQuality = custom;
+      _fps = fps;
+    });
+  }
+
+  Widget _buildMode() {
+    final mode = sessionModeOf(_quality, _customQuality);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 8,
+          children: [
+            for (final (value, label) in [
+              (SessionMode.speed, 'Speed mode'),
+              (SessionMode.hd, 'HD mode'),
+            ])
+              ChoiceChip(
+                label: Text(translate(label)),
+                selected: mode == value,
+                onSelected: (_) => _setMode(value),
+              ),
+            ChoiceChip(
+              label: Text(translate('Custom')),
+              selected: _showQualityDetails,
+              onSelected: (on) => setState(() => _customOpen = on),
+            ),
+          ],
+        ),
+        if (mode != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              translate(mode == SessionMode.speed
+                  ? 'speed-mode-tip'
+                  : 'hd-mode-tip'),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+      ],
+    );
+  }
+
+  Future<void> _setFps(int fps) async {
+    final sessionId = ffi.sessionId;
+    if (_quality != kRemoteImageQualityCustom) {
+      if (fps == kDefaultFps) return;
+      final custom = customQualityForPreset(_quality ?? '');
+      await bind.sessionSetImageQuality(
+          sessionId: sessionId, value: kRemoteImageQualityCustom);
+      await bind.sessionSetCustomImageQuality(
+          sessionId: sessionId, value: custom);
+      _quality = kRemoteImageQualityCustom;
+      _customQuality = custom;
+    }
+    await bind.sessionSetCustomFps(sessionId: sessionId, fps: fps);
+    if (mounted) setState(() => _fps = fps);
   }
 
   void _run(VoidCallback action) {
@@ -372,12 +689,29 @@ class _SessionPanelState extends State<SessionPanel> {
               if (_showDetails) _buildDetails(context),
               const SizedBox(height: 12),
               _buildActions(context),
-              _sectionTitle(context, translate('Image Quality')),
-              _buildQuality(),
+              ..._buildDisplays(context),
+              _sectionTitle(context, translate('Mode')),
+              _buildMode(),
+              if (_showQualityDetails) ...[
+                _sectionTitle(context, translate('Image Quality')),
+                _buildQuality(),
+                if (_fpsAllowed) ...[
+                  _sectionTitle(context, translate('FPS')),
+                  _buildFps(),
+                ],
+              ],
+              if (!ffi.ffiModel.touchMode) ...[
+                _sectionTitle(context, translate('Pointer speed')),
+                _buildPointerSpeed(),
+              ],
               _sectionTitle(context, translate('Shortcuts')),
               _buildShortcuts(context),
               _sectionTitle(context, translate('Session options')),
               _buildToggles(),
+              if (_controls.isNotEmpty) ...[
+                _sectionTitle(context, translate('More')),
+                _buildControls(),
+              ],
             ],
           ),
         ),
@@ -450,6 +784,10 @@ class _SessionPanelState extends State<SessionPanel> {
                   secure, direct, ffi.ffiModel.cachedPeerData.streamType)
             ),
           if (data.delay != null) (translate('Delay'), '${data.delay} ms'),
+          if (data.decodeMs != null)
+            (translate('Decode and convert'), '${data.decodeMs} ms'),
+          if (data.presentMs != null)
+            (translate('Hand over to display'), '${data.presentMs} ms'),
           if (data.speed != null) (translate('Speed'), data.speed!),
           if (data.fps != null) (translate('FPS'), data.fps!),
           if (data.targetBitrate != null)
@@ -501,41 +839,98 @@ class _SessionPanelState extends State<SessionPanel> {
   Widget _buildActions(BuildContext context) {
     final a = widget.actions;
     final touch = ffi.ffiModel.touchMode;
-    final items = <(IconData, String, VoidCallback)>[
-      (Icons.keyboard, translate('Keyboard'), () => _run(a.openKeyboard)),
-      (
-        touch ? Icons.touch_app : Icons.mouse,
-        translate(touch ? 'Touch mode' : 'Trackpad mode'),
+    final keyboard = ffi.ffiModel.keyboard && !ffi.ffiModel.viewOnly;
+    final privacyState = PrivacyModeState.find(widget.id);
+    // Offered under the same conditions as in the display settings.
+    final privacy = (ffi.ffiModel.pi.features.privacyMode &&
+                ffi.ffiModel.keyboard) ||
+            privacyState.value.isNotEmpty
+        ? toolbarPrivacyMode(privacyState, context, widget.id, ffi)
+            .where((m) => m.onChanged != null)
+            .toList()
+        : <TToggleMenu>[];
+    // What each action does now, and whether it is lit. An action missing
+    // here is not available in this session.
+    final live = <String, (VoidCallback, bool)>{
+      'keyboard': (() => _run(a.openKeyboard), false),
+      'fn-keys': (() => _run(a.openFnPad), false),
+      'send-text': (() => _run(a.sendText), false),
+      'touch-mode': (
         () {
           a.toggleTouchMode();
           setState(() {});
-        }
+        },
+        false
       ),
-      (
-        a.isLandscapeLocked() ? Icons.screen_lock_rotation : Icons.screen_rotation,
-        translate('Landscape'),
-        () => _run(a.toggleLandscape)
-      ),
-      (Icons.gesture, translate('Gestures'), () => _run(a.showGestureHelp)),
-      (
-        a.isBarShown() ? Icons.keyboard_arrow_down : Icons.keyboard_arrow_up,
-        translate('Toolbar'),
-        () => _run(a.toggleBar)
-      ),
-      (Icons.folder_outlined, translate('Transfer file'),
-          () => _run(a.openFileTransfer)),
-      (Icons.chat_bubble_outline, translate('Chat'), () => _run(a.openChat)),
-      (Icons.tv, translate('Display Settings'),
-          () => _run(a.showDisplayOptions)),
-      (Icons.more_horiz, translate('More'), () => _run(a.showMoreActions)),
-      (Icons.close, translate('Disconnect'), () => _run(a.disconnect)),
+      if (keyboard && !ffi.ffiModel.isPeerAndroid)
+        'game-keys': (() => _run(a.toggleGameKeys), a.isGameKeysShown()),
+      if (isSessionScreenshotSupported(ffi))
+        'screenshot': (() => _run(() => takeSessionScreenshot(ffi)), false),
+      if (a.isRecording() || isSessionRecordingOffered(ffi))
+        'record': (() => _run(a.toggleRecording), a.isRecording()),
+      if (privacy.isNotEmpty)
+        'privacy-mode': (
+          () => _togglePrivacyMode(privacy),
+          privacy.any((m) => m.value)
+        ),
+      if (keyboard)
+        'lock': (
+          () => _run(() => bind.sessionLockScreen(sessionId: ffi.sessionId)),
+          false
+        ),
+      if (ffi.ffiModel.permissions['restart'] != false &&
+          const [kPeerPlatformLinux, kPeerPlatformWindows, kPeerPlatformMacOS]
+              .contains(ffi.ffiModel.pi.platform))
+        'restart': (
+          () => _run(() => showRestartRemoteDevice(
+              ffi.ffiModel.pi, widget.id, ffi.sessionId, ffi.dialogManager)),
+          false
+        ),
+      'landscape': (() => _run(a.toggleLandscape), a.isLandscapeLocked()),
+      'gestures': (() => _run(a.showGestureHelp), false),
+      'file-transfer': (() => _run(a.openFileTransfer), false),
+      'chat': (() => _run(a.openChat), false),
+      'display-settings': (() => _run(a.showDisplayOptions), false),
+    };
+    final items = <(IconData, String, VoidCallback, bool)>[
+      for (final entry in _actionOrder)
+        if (entry.shown && live.containsKey(entry.id))
+          () {
+            final (_, icon, label) =
+                kPanelQuickActions.firstWhere((e) => e.$1 == entry.id);
+            final (onTap, lit) = live[entry.id]!;
+            return switch (entry.id) {
+              'touch-mode' => (
+                  touch ? Icons.touch_app : Icons.mouse,
+                  translate(touch ? 'Touch mode' : 'Trackpad mode'),
+                  onTap,
+                  lit
+                ),
+              'record' => (
+                  lit ? Icons.stop_circle_outlined : icon,
+                  translate(lit ? 'Stop session recording' : label),
+                  onTap,
+                  lit
+                ),
+              'landscape' => (
+                  lit ? Icons.screen_lock_rotation : icon,
+                  translate(label),
+                  onTap,
+                  false
+                ),
+              _ => (icon, translate(label), onTap, lit),
+            };
+          }(),
+      (Icons.close, translate('Disconnect'), () => _run(a.disconnect), false),
     ];
+    final accent = Theme.of(context).colorScheme.primary;
     return LayoutBuilder(builder: (context, constraints) {
       final columns = constraints.maxWidth >= 520 ? 10 : 5;
       final width = constraints.maxWidth / columns;
-      return Wrap(
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Wrap(
         children: [
-          for (final (icon, label, onTap) in items)
+          for (final (icon, label, onTap, lit) in items)
             SizedBox(
               width: width,
               child: InkWell(
@@ -545,20 +940,136 @@ class _SessionPanelState extends State<SessionPanel> {
                   padding: const EdgeInsets.symmetric(vertical: 8),
                   child: Column(
                     children: [
-                      Icon(icon, size: 26),
+                      Icon(icon, size: 26, color: lit ? accent : null),
                       const SizedBox(height: 4),
                       Text(label,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 12)),
+                          style: TextStyle(
+                              fontSize: 12, color: lit ? accent : null)),
                     ],
                   ),
                 ),
               ),
             ),
         ],
-      );
+        ),
+        Row(
+          children: [
+            Expanded(
+              child: Text(translate('floating-ball-tip'),
+                  style: TextStyle(
+                      fontSize: 12, color: Theme.of(context).hintColor)),
+            ),
+            TextButton(
+              style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+              onPressed: _editActions,
+              child: Text(translate('Edit')),
+            ),
+          ],
+        ),
+      ]);
     });
+  }
+
+  Future<void> _editActions() async {
+    final next = await showPanelActionsEditor(context, _actionOrder);
+    if (next == null) return;
+    await bind.mainSetLocalOption(
+        key: kOptionMobilePanelActions, value: formatPanelActions(next));
+    if (mounted) setState(() => _actionOrder = next);
+  }
+
+  /// Turns privacy mode off if it is on. To turn it on, a remote offering
+  /// several ways of doing it is asked which.
+  Future<void> _togglePrivacyMode(List<TToggleMenu> menus) async {
+    final active = menus.where((m) => m.value).toList();
+    var target = active.isNotEmpty ? active.first : menus.first;
+    if (active.isEmpty && menus.length > 1) {
+      final picked = await showDialog<TToggleMenu>(
+        context: context,
+        builder: (context) => SimpleDialog(
+          title: Text(translate('Privacy mode')),
+          children: [
+            for (final m in menus)
+              SimpleDialogOption(
+                  onPressed: () => Navigator.pop(context, m), child: m.child),
+          ],
+        ),
+      );
+      if (picked == null || !mounted) return;
+      target = picked;
+    }
+    _run(() => target.onChanged?.call(active.isEmpty));
+  }
+
+  /// One chip per remote display, the way Sunlogin offers "switch screen"
+  /// among its quick actions.
+  List<Widget> _buildDisplays(BuildContext context) {
+    final pi = ffi.ffiModel.pi;
+    final privacyMode = PrivacyModeState.find(widget.id);
+    if (pi.displays.length <= 1 ||
+        pi.currentDisplay == kAllDisplayValue ||
+        (privacyMode.value.isNotEmpty &&
+            !allowDisplaySwitchInPrivacyMode(pi, privacyMode.value))) {
+      return const [];
+    }
+    return [
+      _sectionTitle(context, translate('Monitor')),
+      Wrap(
+        spacing: 8,
+        children: [
+          for (var i = 0; i < pi.displays.length; i++)
+            ChoiceChip(
+              avatar: const Icon(Icons.monitor, size: 18),
+              label: Text('${i + 1}'),
+              selected: i == pi.currentDisplay,
+              onSelected: (_) {
+                if (i == pi.currentDisplay) return;
+                _run(() => openMonitorInTheSameTab(i, ffi, pi));
+              },
+            ),
+        ],
+      ),
+    ];
+  }
+
+  Widget _buildPointerSpeed() {
+    return Row(
+      children: [
+        Text(translate('Slow'), style: const TextStyle(fontSize: 12)),
+        Expanded(
+          child: Slider(
+            value: _pointerSpeed,
+            min: kPointerSpeedMin,
+            max: kPointerSpeedMax,
+            divisions: 6,
+            label: '${_pointerSpeed.toStringAsFixed(2)}x',
+            onChanged: (v) => setState(() => _pointerSpeed = v),
+            onChangeEnd: (v) => bind.mainSetLocalOption(
+                key: kOptionMobilePointerSpeed, value: v.toString()),
+          ),
+        ),
+        Text(translate('Fast'), style: const TextStyle(fontSize: 12)),
+      ],
+    );
+  }
+
+  Widget _buildControls() {
+    return Column(
+      children: [
+        for (final m in _controls)
+          ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            visualDensity: VisualDensity.compact,
+            title: m.getChild(),
+            onTap: m.onPressed == null ? null : () => _run(m.onPressed!),
+          ),
+      ],
+    );
   }
 
   Widget _buildQuality() {
@@ -573,12 +1084,22 @@ class _SessionPanelState extends State<SessionPanel> {
         for (final (value, label) in options)
           ChoiceChip(
             label: Text(label),
-            selected: _quality == value,
-            onSelected: (_) async {
-              await bind.sessionSetImageQuality(
-                  sessionId: ffi.sessionId, value: value);
-              if (mounted) setState(() => _quality = value);
-            },
+            selected: _preset == value,
+            onSelected: (_) => _setQuality(value),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildFps() {
+    return Wrap(
+      spacing: 8,
+      children: [
+        for (final fps in sessionFpsChoices(screenRefreshRate()))
+          ChoiceChip(
+            label: Text('$fps'),
+            selected: _fps == fps,
+            onSelected: (_) => _setFps(fps),
           ),
       ],
     );
@@ -655,8 +1176,73 @@ class _SessionPanelState extends State<SessionPanel> {
       future: _toggles,
       builder: (context, snapshot) {
         final toggles = snapshot.data ?? const <TToggleMenu>[];
+        final videoTexture = widget.actions.videoTexture;
         return Column(
           children: [
+            SwitchListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: Text(translate('Toolbar')),
+              value: widget.actions.isBarShown(),
+              onChanged: (_) => setState(widget.actions.toggleBar),
+            ),
+            if (isIOS)
+              SwitchListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text(translate('Keep running in background')),
+                subtitle: Text(translate('background-keep-alive-tip')),
+                value: BackgroundKeepAlive.enabled,
+                onChanged: (on) async {
+                  await BackgroundKeepAlive.setEnabled(on);
+                  if (mounted) setState(() {});
+                },
+              ),
+            if (isIOS)
+              SwitchListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text(translate('Phone-friendly resolution')),
+                subtitle: Text(translate('phone-resolution-tip')),
+                value: isPhoneResolutionEnabled(),
+                onChanged: (on) async {
+                  await bind.mainSetLocalOption(
+                      key: kOptionMobilePhoneResolution, value: on ? 'Y' : '');
+                  if (on) {
+                    await applyPhoneResolution(ffi);
+                  } else {
+                    await restoreRemoteResolution(ffi);
+                  }
+                  if (mounted) setState(() {});
+                },
+              ),
+            if (videoTexture != null)
+              SwitchListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text(translate('Low-latency rendering')),
+                subtitle: Text(translate('texture-render-tip')),
+                value: videoTexture.enabled,
+                onChanged: (on) {
+                  bind.mainSetLocalOption(
+                      key: kOptionMobileTextureRender, value: on ? 'Y' : 'N');
+                  setState(() => videoTexture.setEnabled(on));
+                },
+              ),
+            if (videoTexture != null)
+              SwitchListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text(translate('Zero-copy display')),
+                subtitle: Text(translate('zero-copy-tip')),
+                value:
+                    bind.mainGetLocalOption(key: kOptionMobileZeroCopy) == 'Y',
+                onChanged: (on) async {
+                  await bind.mainSetLocalOption(
+                      key: kOptionMobileZeroCopy, value: on ? 'Y' : '');
+                  if (mounted) setState(() {});
+                },
+              ),
             for (final t in toggles)
               SwitchListTile(
                 dense: true,

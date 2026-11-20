@@ -284,6 +284,8 @@ struct RgbaData {
     // We must check the `rgba_valid` before reading [rgba].
     data: Vec<u8>,
     valid: bool,
+    #[cfg(target_os = "ios")]
+    meter: crate::client::helper::UiFrameMeter,
 }
 
 pub type FlutterRgbaRendererPluginOnRgba = unsafe extern "C" fn(
@@ -533,6 +535,61 @@ impl VideoRenderer {
         }
     }
 
+    // False for a frame the texture does not take, which leaves it to the soft renderer.
+    #[cfg(target_os = "ios")]
+    pub fn on_rgba_ios(&self, rgba: &scrap::ImageRgb) -> bool {
+        extern "C" {
+            // flutter/ios/Runner/AppDelegate.swift
+            fn rustdesk_ios_video_texture_on_rgba(
+                texture: *mut c_void,
+                buffer: *const u8,
+                len: c_int,
+                width: c_int,
+                height: c_int,
+            ) -> bool;
+        }
+        // Held for the call, so that unregistering a texture waits for a frame being written to it.
+        let sessions_lock = self.map_display_sessions.read().unwrap();
+        // The phone shows one display at a time, whichever it is.
+        let Some(info) = sessions_lock
+            .values()
+            .find(|info| info.texture_rgba_ptr != usize::default())
+        else {
+            return false;
+        };
+        unsafe {
+            rustdesk_ios_video_texture_on_rgba(
+                info.texture_rgba_ptr as _,
+                rgba.raw.as_ptr(),
+                rgba.raw.len() as _,
+                rgba.w as _,
+                rgba.h as _,
+            )
+        }
+    }
+
+    // The same for a frame that is still on the GPU, which the texture then shows as it is.
+    #[cfg(all(target_os = "ios", feature = "hwcodec"))]
+    fn on_pixel_buffer_ios(&self, pixel_buffer: *mut c_void) -> bool {
+        extern "C" {
+            // flutter/ios/Runner/AppDelegate.swift
+            fn rustdesk_ios_video_texture_on_pixel_buffer(
+                texture: *mut c_void,
+                pixel_buffer: *mut c_void,
+            ) -> bool;
+        }
+        let sessions_lock = self.map_display_sessions.read().unwrap();
+        let Some(info) = sessions_lock
+            .values()
+            .find(|info| info.texture_rgba_ptr != usize::default())
+        else {
+            return false;
+        };
+        unsafe {
+            rustdesk_ios_video_texture_on_pixel_buffer(info.texture_rgba_ptr as _, pixel_buffer)
+        }
+    }
+
     #[cfg(feature = "vram")]
     pub fn on_texture(&self, display: usize, texture: *mut c_void) -> bool {
         let mut write_lock = self.map_display_sessions.write().unwrap();
@@ -742,6 +799,14 @@ impl InvokeUiSession for FlutterHandler {
                     &status.codec_format.map_or(NULL, |it| it.to_string()),
                 ),
                 ("chroma", &status.chroma.map_or(NULL, |it| it.to_string())),
+                (
+                    "decode_ms",
+                    &status.decode_ms.map_or(NULL, |it| format!("{it:.1}")),
+                ),
+                (
+                    "present_ms",
+                    &status.present_ms.map_or(NULL, |it| format!("{it:.1}")),
+                ),
             ],
             &[],
         );
@@ -887,6 +952,16 @@ impl InvokeUiSession for FlutterHandler {
     #[inline]
     #[cfg(any(target_os = "android", target_os = "ios"))]
     fn on_rgba(&self, display: usize, rgba: &mut scrap::ImageRgb) {
+        #[cfg(target_os = "ios")]
+        if self
+            .session_handlers
+            .read()
+            .unwrap()
+            .values()
+            .any(|h| h.renderer.on_rgba_ios(rgba))
+        {
+            return;
+        }
         self.on_rgba_soft_render(display, rgba);
     }
 
@@ -1126,7 +1201,19 @@ impl InvokeUiSession for FlutterHandler {
     fn next_rgba(&self, _display: usize) {
         if let Some(rgba_data) = self.display_rgbas.write().unwrap().get_mut(&_display) {
             rgba_data.valid = false;
+            #[cfg(target_os = "ios")]
+            rgba_data.meter.released();
         }
+    }
+
+    #[cfg(target_os = "ios")]
+    fn ui_fps(&self) -> Option<usize> {
+        self.display_rgbas
+            .write()
+            .unwrap()
+            .values_mut()
+            .filter_map(|rgba_data| rgba_data.meter.take_fps())
+            .min()
     }
 
     fn update_record_status(&self, start: bool) {
@@ -1227,10 +1314,14 @@ impl FlutterHandler {
             }
             // Return the rgba buffer to the video handler for reusing allocated rgba buffer.
             std::mem::swap::<Vec<u8>>(&mut rgba.raw, &mut rgba_data.data);
+            #[cfg(target_os = "ios")]
+            rgba_data.meter.taken();
         } else {
             let mut rgba_data = RgbaData::default();
             std::mem::swap::<Vec<u8>>(&mut rgba.raw, &mut rgba_data.data);
             rgba_data.valid = true;
+            #[cfg(target_os = "ios")]
+            rgba_data.meter.taken();
             rgba_write_lock.insert(display, rgba_data);
         }
         drop(rgba_write_lock);
@@ -1474,7 +1565,6 @@ pub fn update_file_clipboard_required() {
     Client::set_is_file_clipboard_required(is_required);
 }
 
-#[cfg(not(target_os = "ios"))]
 pub fn send_clipboard_msg(msg: Message, _is_file: bool) {
     send_clipboard_msg_impl(msg, _is_file, None);
 }
@@ -1485,8 +1575,9 @@ pub fn send_clipboard_msg_to_other_sessions(msg: Message, except_session_id: u64
     send_clipboard_msg_impl(msg, false, Some(except_session_id));
 }
 
-#[cfg(not(target_os = "ios"))]
 fn send_clipboard_msg_impl(msg: Message, _is_file: bool, except_session_id: Option<u64>) {
+    let session_count = sessions::get_sessions().len();
+    log::info!("send_clipboard_msg_impl: total sessions={}, is_file={}", session_count, _is_file);
     for s in sessions::get_sessions() {
         if !s.is_default() {
             continue;
@@ -1506,7 +1597,7 @@ fn send_clipboard_msg_impl(msg: Message, _is_file: bool, except_session_id: Opti
             continue;
         }
         if s.is_text_clipboard_required() {
-            // Check if the client supports multi clipboards
+            #[cfg(not(target_os = "ios"))]
             if let Some(message::Union::MultiClipboards(multi_clipboards)) = &msg.union {
                 let version = s.ui_handler.peer_info.read().unwrap().version.clone();
                 let platform = s.ui_handler.peer_info.read().unwrap().platform.clone();
@@ -1781,8 +1872,23 @@ pub fn session_set_size(session_id: SessionID, display: usize, width: usize, hei
     }
 }
 
+// The phone shows one video session at a time, so whichever has a texture takes the frame.
+#[cfg(all(target_os = "ios", feature = "hwcodec"))]
+fn ios_native_frame_sink(pixel_buffer: *mut c_void, _width: usize, _height: usize) -> bool {
+    sessions::get_sessions().iter().any(|s| {
+        s.ui_handler
+            .session_handlers
+            .read()
+            .unwrap()
+            .values()
+            .any(|h| h.renderer.on_pixel_buffer_ios(pixel_buffer))
+    })
+}
+
 #[inline]
 pub fn session_register_pixelbuffer_texture(session_id: SessionID, display: usize, ptr: usize) {
+    #[cfg(all(target_os = "ios", feature = "hwcodec"))]
+    scrap::hwcodec::set_native_frame_sink(ios_native_frame_sink);
     for s in sessions::get_sessions() {
         if let Some(h) = s
             .ui_handler

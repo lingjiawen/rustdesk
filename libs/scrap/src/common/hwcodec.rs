@@ -203,6 +203,15 @@ impl EncoderApi for HwRamEncoder {
             .all(|&x| !self.config.name.contains(x))
     }
 
+    fn request_keyframe(&mut self) -> bool {
+        // Only where the encoder is known to honour it.
+        if !self.config.name.contains("videotoolbox") {
+            return false;
+        }
+        self.encoder.request_keyframe();
+        true
+    }
+
     fn is_hardware(&self) -> bool {
         true
     }
@@ -360,7 +369,12 @@ impl HwRamDecoder {
             thread_count: codec_thread_num(16) as _,
         };
         match Decoder::new(ctx) {
-            Ok(decoder) => Ok(HwRamDecoder { decoder, info }),
+            #[allow(unused_mut)]
+            Ok(mut decoder) => {
+                #[cfg(target_os = "ios")]
+                decoder.set_native_frames(native_frames_enabled());
+                Ok(HwRamDecoder { decoder, info })
+            }
             Err(_) => {
                 HwCodecConfig::clear(false, false);
                 Err(anyhow!(format!("Failed to create decoder")))
@@ -379,6 +393,97 @@ pub struct HwRamDecoderImage<'a> {
     frame: &'a DecodeFrame,
 }
 
+/// The local option that makes the decoder hand frames out as they are on the GPU.
+#[cfg(target_os = "ios")]
+pub const OPTION_NATIVE_FRAMES: &str = "mobile-zero-copy";
+
+#[cfg(target_os = "ios")]
+fn native_frames_enabled() -> bool {
+    hbb_common::config::LocalConfig::get_option(OPTION_NATIVE_FRAMES) == "Y"
+}
+
+/// Shows a decoded frame that is still on the GPU, a CVPixelBuffer. False when nothing takes
+/// it; the frame is then converted for the soft renderer like any other.
+#[cfg(target_os = "ios")]
+pub type NativeFrameSink = fn(pixel_buffer: *mut std::ffi::c_void, width: usize, height: usize) -> bool;
+
+#[cfg(target_os = "ios")]
+static NATIVE_FRAME_SINK: std::sync::RwLock<Option<NativeFrameSink>> = std::sync::RwLock::new(None);
+
+#[cfg(target_os = "ios")]
+pub fn set_native_frame_sink(sink: NativeFrameSink) {
+    *NATIVE_FRAME_SINK.write().unwrap() = Some(sink);
+}
+
+#[cfg(target_os = "ios")]
+#[link(name = "CoreVideo", kind = "framework")]
+extern "C" {
+    fn CVPixelBufferLockBaseAddress(pixel_buffer: *mut std::ffi::c_void, flags: u64) -> i32;
+    fn CVPixelBufferUnlockBaseAddress(pixel_buffer: *mut std::ffi::c_void, flags: u64) -> i32;
+    fn CVPixelBufferGetBaseAddressOfPlane(pixel_buffer: *mut std::ffi::c_void, plane: usize) -> *const u8;
+    fn CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer: *mut std::ffi::c_void, plane: usize) -> usize;
+    fn CVPixelBufferGetPlaneCount(pixel_buffer: *mut std::ffi::c_void) -> usize;
+}
+
+#[cfg(target_os = "ios")]
+impl HwRamDecoderImage<'_> {
+    pub fn size(&self) -> (usize, usize) {
+        (self.frame.width as _, self.frame.height as _)
+    }
+
+    /// Hands the frame to the display as it is on the GPU. False when it is not such a frame
+    /// or nothing takes it.
+    pub fn show_native(&self) -> bool {
+        if self.frame.native.is_null() {
+            return false;
+        }
+        let Some(sink) = *NATIVE_FRAME_SINK.read().unwrap() else {
+            return false;
+        };
+        let (width, height) = self.size();
+        sink(self.frame.native, width, height)
+    }
+
+    // VideoToolbox decodes 8-bit video into two planes, like NV12.
+    fn native_to_fmt(&self, rgb: &mut ImageRgb, bytes_per_row: usize) -> ResultType<()> {
+        const READ_ONLY: u64 = 1;
+        let pixel_buffer = self.frame.native;
+        let f = match rgb.fmt() {
+            ImageFormat::ARGB => NV12ToARGB,
+            ImageFormat::ABGR => NV12ToABGR,
+            _ => bail!("unsupported format: {:?}", rgb.fmt()),
+        };
+        unsafe {
+            if CVPixelBufferGetPlaneCount(pixel_buffer) != 2
+                || CVPixelBufferLockBaseAddress(pixel_buffer, READ_ONLY) != 0
+            {
+                bail!("unreadable pixel buffer");
+            }
+            let y = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0);
+            let uv = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1);
+            let ret = if y.is_null() || uv.is_null() {
+                -1
+            } else {
+                f(
+                    y,
+                    CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0) as _,
+                    uv,
+                    CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1) as _,
+                    rgb.raw.as_mut_ptr(),
+                    bytes_per_row as _,
+                    self.frame.width,
+                    self.frame.height,
+                )
+            };
+            CVPixelBufferUnlockBaseAddress(pixel_buffer, READ_ONLY);
+            if ret != 0 {
+                bail!("failed to convert pixel buffer: {ret}");
+            }
+        }
+        Ok(())
+    }
+}
+
 impl HwRamDecoderImage<'_> {
     // rgb [in/out] fmt and stride must be set in ImageRgb
     pub fn to_fmt(&self, rgb: &mut ImageRgb, i420: &mut Vec<u8>) -> ResultType<()> {
@@ -390,6 +495,10 @@ impl HwRamDecoderImage<'_> {
         let dst_align = rgb.align();
         let bytes_per_row = (rgb.w * 4 + dst_align - 1) & !(dst_align - 1);
         rgb.raw.resize(rgb.h * bytes_per_row, 0);
+        #[cfg(target_os = "ios")]
+        if !frame.native.is_null() {
+            return self.native_to_fmt(rgb, bytes_per_row);
+        }
         match frame.pixfmt {
             AVPixelFormat::AV_PIX_FMT_NV12 => {
                 // I420ToARGB is much faster than NV12ToARGB in tests on Windows

@@ -1151,6 +1151,11 @@ impl Connection {
                 Some(data) = rx_from_authed.recv() => {
                     match data {
                         ipc::Data::Close => {
+                            if raii::AuthedConnID::session_reconnected(id, &conn.session_key()) {
+                                // Its peer is on the new connection; nothing is owed to this one.
+                                conn.on_close("replaced by a new connection of its session", false).await;
+                                break;
+                            }
                             conn.send(crate::common::make_privacy_mode_msg(
                                 back_notification::PrivacyModeState::PrvOnByOther,
                                 String::new(),
@@ -1410,8 +1415,22 @@ impl Connection {
         self.send(msg_out).await;
     }
 
+    // Whether privacy mode is held by a connection that the session logging in here left
+    // behind. That one is closed as soon as this one is authorized, so it must not keep its
+    // own session out meanwhile.
+    fn reconnects_privacy_mode_owner(&self) -> bool {
+        let Some(owner) = privacy_mode::get_privacy_mode_conn_id() else {
+            return false;
+        };
+        let key = self.session_key();
+        AUTHED_CONNS.lock().unwrap().iter().any(|c| {
+            c.conn_id == owner
+                && raii::AuthedConnID::is_older_session_remote(c, self.inner.id(), &key)
+        })
+    }
+
     async fn check_privacy_mode_on(&mut self) -> bool {
-        if privacy_mode::is_in_privacy_mode() {
+        if privacy_mode::is_in_privacy_mode() && !self.reconnects_privacy_mode_owner() {
             self.send_login_error("Someone turns on privacy mode, exit")
                 .await;
             false
@@ -6919,6 +6938,15 @@ mod raii {
             c.conn_id > id && c.conn_type == AuthConnType::Remote && &c.session_key == key
         }
 
+        /// Whether `c` is a remote control connection that the session of connection `id` left
+        /// behind. Peers too old to send a session id cannot be told apart this way.
+        pub(super) fn is_older_session_remote(c: &AuthedConn, id: i32, key: &SessionKey) -> bool {
+            key.session_id != 0
+                && c.conn_id < id
+                && c.conn_type == AuthConnType::Remote
+                && &c.session_key == key
+        }
+
         /// Whether a newer remote control connection of this session has replaced this one. A
         /// controlling peer whose link dies reconnects while the connection it left behind runs
         /// on here until its own timeout; locking for that one would lock a session that has
@@ -6940,6 +6968,8 @@ mod raii {
             let printer = conn_type == crate::server::AuthConnType::Remote
                 && crate::is_support_remote_print(&lr.version)
                 && lr.my_platform == hbb_common::whoami::Platform::Windows.to_string();
+            let replaces = conn_type == AuthConnType::Remote;
+            let key = session_key.clone();
             AUTHED_CONNS.lock().unwrap().push(AuthedConn {
                 conn_id,
                 conn_type,
@@ -6947,6 +6977,19 @@ mod raii {
                 sender,
                 printer,
             });
+            if replaces {
+                // A controlling peer whose link dies logs in again on a new connection. The one
+                // it left behind would stay until its own timeout, still sent the screen,
+                // counted when the codec is chosen, and holding privacy mode if it had it.
+                AUTHED_CONNS
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|c| Self::is_older_session_remote(c, conn_id, &key))
+                    .for_each(|c| {
+                        c.sender.send(Data::Close).ok();
+                    });
+            }
             Self::check_wake_lock();
             use std::sync::Once;
             static _ONCE: Once = Once::new();
@@ -7886,6 +7929,13 @@ mod test {
         let remote = AuthConnType::Remote;
 
         assert!(replaced_by(&conn(3, remote, mine.clone()), 2, &mine));
+        // And the other way round: what a new connection of the session closes.
+        let left_behind = super::raii::AuthedConnID::is_older_session_remote;
+        assert!(left_behind(&conn(2, remote, mine.clone()), 3, &mine));
+        assert!(!left_behind(&conn(3, remote, mine.clone()), 3, &mine));
+        assert!(!left_behind(&conn(2, AuthConnType::Terminal, mine.clone()), 3, &mine));
+        assert!(!left_behind(&conn(2, remote, key(8, "peer")), 3, &mine));
+        assert!(!left_behind(&conn(2, remote, key(0, "peer")), 3, &key(0, "peer")));
         // An older one, and itself: of connections ending at once only the last still locks.
         assert!(!replaced_by(&conn(1, remote, mine.clone()), 2, &mine));
         assert!(!replaced_by(&conn(2, remote, mine.clone()), 2, &mine));

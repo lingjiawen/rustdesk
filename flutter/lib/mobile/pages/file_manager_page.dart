@@ -13,6 +13,7 @@ import '../../common.dart';
 import '../../common/widgets/dialog.dart';
 import '../../consts.dart';
 import '../../utils/android_documents.dart';
+import '../widgets/background_keep_alive.dart';
 
 class FileManagerPage extends StatefulWidget {
   FileManagerPage(
@@ -332,6 +333,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
     });
     gFFI.ffiModel.updateEventListener(gFFI.sessionId, widget.id);
     WakelockManager.enable(_uniqueKey);
+    if (isIOS) BackgroundKeepAlive.sessionOpened();
   }
 
   @override
@@ -342,6 +344,7 @@ class _FileManagerPageState extends State<FileManagerPage> {
       WakelockManager.disable(_uniqueKey);
     });
     model.jobController.clear();
+    if (isIOS) BackgroundKeepAlive.sessionClosed();
     super.dispose();
   }
 
@@ -759,8 +762,31 @@ class _FileManagerPageState extends State<FileManagerPage> {
         case JobState.none:
           break;
         case JobState.paused:
-          // TODO: Handle this case.
-          break;
+          // The transfers an earlier connection left unfinished.
+          final paused =
+              jobTable.where((job) => job.state == JobState.paused).toList();
+          return BottomSheetBody(
+            leading: Icon(Icons.history),
+            title: "${translate("Unfinished transfers")} (${paused.length})",
+            text: activeJob.jobName.split(RegExp(r'[\\/]')).last,
+            actions: [
+              IconButton(
+                icon: Icon(Icons.play_arrow),
+                tooltip: translate("Continue"),
+                onPressed: () {
+                  for (final job in paused) {
+                    model.jobController.resumeJob(job.id);
+                  }
+                },
+              ),
+            ],
+            onCanceled: () {
+              for (final job in paused) {
+                model.jobController.cancelJob(job.id);
+              }
+              jobTable.removeWhere((job) => job.state == JobState.paused);
+            },
+          );
       }
       return Offstage();
     });

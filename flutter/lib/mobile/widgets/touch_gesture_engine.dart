@@ -9,6 +9,7 @@ import '../../common.dart';
 import '../../consts.dart';
 import '../../models/input_model.dart';
 import '../../models/model.dart';
+import '../../models/platform_model.dart';
 import 'session_panel.dart';
 
 /// Shown at the top-left while a held finger is ready to drag or right-click,
@@ -92,6 +93,20 @@ SessionShortcut? swipeShortcut(TouchSwipe direction, String platform) {
   return null;
 }
 
+const kOptionMobilePointerSpeed = 'mobile-pointer-speed';
+const double kPointerSpeedMin = 0.5;
+const double kPointerSpeedMax = 2.0;
+
+/// The saved pointer-mode speed, 1 when unset or unreadable.
+double parsePointerSpeed(String value) {
+  final speed = double.tryParse(value);
+  if (speed == null || !speed.isFinite) return 1.0;
+  return speed.clamp(kPointerSpeedMin, kPointerSpeedMax);
+}
+
+double loadPointerSpeed() =>
+    parsePointerSpeed(bind.mainGetLocalOption(key: kOptionMobilePointerSpeed));
+
 typedef TouchTimerFactory = Timer Function(
     Duration duration, void Function() callback);
 
@@ -132,6 +147,9 @@ class TouchGestureClassifier {
 
   final TouchGestureSink sink;
   bool touchMode;
+
+  /// Pointer mode: scales how far the cursor travels for a finger movement.
+  double pointerSpeed = 1.0;
   final TouchTimerFactory _timerFactory;
 
   static const double tapSlop = 10;
@@ -230,6 +248,9 @@ class TouchGestureClassifier {
         _cancelTimers();
         if (touchMode) {
           _phase = _Phase.scroll;
+          // The remote side scrolls what is under its cursor, which is still
+          // where the last tap left it.
+          if (sink.canTouchAt(_start)) sink.moveCursorTo(_start);
           sink.scroll(position - _start);
         } else if (_afterTap) {
           _startDrag(pointer, position);
@@ -507,7 +528,7 @@ class TouchGestureClassifier {
     // Touch events come every few milliseconds; smooth over them so one
     // irregular gap does not jerk the cursor.
     _speed = _speed == 0 ? speed : (_speed + speed) / 2;
-    return delta * pointerGain(_speed);
+    return delta * pointerGain(_speed) * pointerSpeed;
   }
 
   static TouchSwipe _swipeDirection(Offset d) => d.dx.abs() > d.dy.abs()
@@ -600,6 +621,7 @@ class _TouchGestureLayerState extends State<TouchGestureLayer>
         if (!_isTouch(e)) return;
         if (_classifier.isIdle) {
           _classifier.touchMode = ffi.ffiModel.touchMode;
+          _classifier.pointerSpeed = loadPointerSpeed();
         }
         _classifier.pointerDown(e.pointer, e.localPosition, e.timeStamp);
       },

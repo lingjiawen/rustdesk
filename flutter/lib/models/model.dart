@@ -27,6 +27,7 @@ import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/models/desktop_render_texture.dart';
 import 'package:flutter_hbb/models/terminal_model.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
+import 'package:flutter_hbb/utils/ios_clipboard_watcher.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
 import 'package:flutter_hbb/utils/http_service.dart' as http;
 import 'package:tuple/tuple.dart';
@@ -41,6 +42,7 @@ import 'package:vector_math/vector_math.dart' show Vector2;
 import '../common.dart';
 import '../utils/image.dart' as img;
 import '../common/widgets/dialog.dart';
+import '../mobile/widgets/session_screenshot.dart';
 import 'input_model.dart';
 import 'platform_model.dart';
 import 'package:flutter_hbb/utils/scale.dart';
@@ -357,6 +359,7 @@ class FfiModel with ChangeNotifier {
         await parent.target?.cursorModel.updateCursorPosition(evt, peerId);
       } else if (name == 'clipboard') {
         Clipboard.setData(ClipboardData(text: evt['content']));
+        parent.target?._iosClipboard?.wroteLocal(evt['content']);
       } else if (name == 'permission') {
         updatePermission(evt, peerId);
       } else if (name == 'chat_client_mode') {
@@ -486,6 +489,10 @@ class FfiModel with ChangeNotifier {
     timerScreenshot?.cancel();
     timerScreenshot = null;
     final msg = evt['msg'] ?? '';
+    if (isIOS && msg.isEmpty) {
+      saveSessionScreenshotToPhotos(sessionId);
+      return;
+    }
     final msgBoxType = 'custom-nook-nocancel-hasclose';
     final msgBoxTitle = 'Take screenshot';
     final dialogManager = parent.target!.dialogManager;
@@ -967,6 +974,12 @@ class FfiModel with ChangeNotifier {
       final hasRetry = evt['hasRetry'] == 'true';
       showPrivacyFailedDialog(
           sessionId, type, title, text, link, hasRetry, dialogManager);
+    } else if (isIOS && text == 'Someone turns on privacy mode, exit') {
+      // It may be this phone's own earlier connection that holds privacy
+      // mode: the remote side has not timed it out yet. It does so within
+      // 30 seconds, so keep trying.
+      showMsgBox(sessionId, type, title, 'privacy-mode-occupied-tip', link,
+          true, dialogManager);
     } else {
       var hasRetry = evt['hasRetry'] == 'true';
       if (!hasRetry) {
@@ -2340,6 +2353,10 @@ class CanvasModel with ChangeNotifier {
   /// the fitted canvas ends above it instead of under it.
   double mobileBottomBarHeight = 0;
 
+  /// Height of the on-screen key bar and function-key pad at the bottom of
+  /// the session (set on iOS), which the canvas must stay clear of.
+  double mobileKeyAreaHeight = 0;
+
   Size getSize() {
     final mediaData = MediaQueryData.fromView(ui.window);
     final size = mediaData.size;
@@ -2356,6 +2373,7 @@ class CanvasModel with ChangeNotifier {
           (parent.target?.cursorModel.keyHelpToolsRectToAdjustCanvas?.bottom ??
               0);
       h -= mobileBottomBarHeight;
+      h -= mobileKeyAreaHeight;
       // Orientation-specific handling:
       //  - Portrait: additionally subtract top padding (e.g. status bar / notch)
       //  - Landscape: does not subtract mediaData.padding.top/bottom (home indicator auto-hides)
@@ -2777,6 +2795,7 @@ class CanvasModel with ChangeNotifier {
     _y = 0;
     _scale = 1.0;
     _locked = false;
+    mobileKeyAreaHeight = 0;
     _lastViewStyle = ViewStyle.defaultViewStyle();
     _timerMobileFocusCanvasCursor?.cancel();
     _timerMobileRestoreCanvasOffset?.cancel();
@@ -3902,6 +3921,8 @@ class QualityMonitorData {
   String? targetBitrate;
   String? codecFormat;
   String? chroma;
+  String? decodeMs;
+  String? presentMs;
 }
 
 class QualityMonitorModel with ChangeNotifier {
@@ -3938,6 +3959,12 @@ class QualityMonitorModel with ChangeNotifier {
 
   updateQualityStatus(Map<String, dynamic> evt) {
     try {
+      final decodeMs = evt['decode_ms'];
+      if (decodeMs is String && decodeMs.isNotEmpty) _data.decodeMs = decodeMs;
+      final presentMs = evt['present_ms'];
+      if (presentMs is String && presentMs.isNotEmpty) {
+        _data.presentMs = presentMs;
+      }
       if (evt.containsKey('speed') && (evt['speed'] as String).isNotEmpty) {
         _data.speed = evt['speed'];
       }
@@ -4038,6 +4065,8 @@ class FFI {
   var version = '';
   var connType = ConnType.defaultConn;
   var closed = false;
+  Timer? _clipboardTimer;
+  IosClipboardWatcher? _iosClipboard;
 
   /// dialogManager use late to ensure init after main page binding [globalKey]
   late final dialogManager = OverlayDialogManager();
@@ -4242,6 +4271,10 @@ class FFI {
 
     final cb = ffiModel.startEventListener(sessionId, id);
 
+    if (isIOS && connType == ConnType.defaultConn) {
+      _startClipboardPolling();
+    }
+
     imageModel.updateUserTextureRender();
     final hasGpuTextureRender = bind.mainHasGpuTextureRender();
     final SimpleWrapper<bool> isToNewWindowNotified = SimpleWrapper(false);
@@ -4411,6 +4444,8 @@ class FFI {
     // Dispose relative mouse mode resources to ensure cursor is restored
     inputModel.disposeRelativeMouseMode();
     inputModel.disposeSideButtonTracking();
+    _clipboardTimer?.cancel();
+    _clipboardTimer = null;
     if (closeSession) {
       await bind.sessionClose(sessionId: sessionId);
     }
@@ -4450,6 +4485,31 @@ class FFI {
     if (model != null) {
       model.handleTerminalResponse(evt);
     }
+  }
+
+  void _startClipboardPolling() {
+    _clipboardTimer?.cancel();
+    const channel = MethodChannel('rustdesk/ios_files');
+    final watcher = IosClipboardWatcher(
+      changeCount: () => channel.invokeMethod<int>('pasteboard_change_count'),
+      hasText: Clipboard.hasStrings,
+      readText: () async =>
+          (await Clipboard.getData(Clipboard.kTextPlain))?.text ?? '',
+      send: (text) => bind.sessionSendClipboardText(text: text),
+      isForeground: () {
+        final state = WidgetsBinding.instance.lifecycleState;
+        return state == null || state == AppLifecycleState.resumed;
+      },
+    );
+    _iosClipboard = watcher;
+    _clipboardTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (closed) {
+        _clipboardTimer?.cancel();
+        _clipboardTimer = null;
+        return;
+      }
+      watcher.poll();
+    });
   }
 }
 

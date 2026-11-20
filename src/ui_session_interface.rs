@@ -422,7 +422,6 @@ impl<T: InvokeUiSession> Session<T> {
         self.lc.read().unwrap().is_privacy_mode_supported()
     }
 
-    #[cfg(not(target_os = "ios"))]
     pub fn is_text_clipboard_required(&self) -> bool {
         *self.server_clipboard_enabled.read().unwrap()
             && *self.server_keyboard_enabled.read().unwrap()
@@ -1320,6 +1319,12 @@ impl<T: InvokeUiSession> Session<T> {
                 ConnectionState::Connected => self.send(Data::Close),
                 ConnectionState::Disconnected => {}
             }
+        } else if connection_round_state_lock.is_connected() {
+            // The first connection is not started here, so no thread is recorded for it. It
+            // loses its channel below all the same, and left alone it would stay connected for
+            // good: answering the peer, never timing out there, and holding what it holds
+            // there, such as privacy mode.
+            self.send(Data::Close);
         }
         let round = connection_round_state_lock.new_round();
         drop(connection_round_state_lock);
@@ -1756,6 +1761,9 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn on_voice_call_incoming(&self);
     fn get_rgba(&self, display: usize) -> *const u8;
     fn next_rgba(&self, display: usize);
+    /// The frames per second the UI could take since the last call, when it is known.
+    #[cfg(target_os = "ios")]
+    fn ui_fps(&self) -> Option<usize>;
     #[cfg(all(feature = "vram", feature = "flutter"))]
     fn on_texture(&self, display: usize, texture: *mut c_void);
     fn set_multiple_windows_session(&self, sessions: Vec<WindowsSession>);

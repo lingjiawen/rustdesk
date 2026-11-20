@@ -50,6 +50,7 @@ pub struct VpxEncoder {
     id: VpxVideoCodecId,
     i444: bool,
     yuvfmt: EncodeYuvFormat,
+    force_key: bool,
 }
 
 pub struct VpxDecoder {
@@ -176,6 +177,7 @@ impl EncoderApi for VpxEncoder {
                     id: config.codec,
                     i444,
                     yuvfmt: Self::get_yuvfmt(config.width, config.height, i444),
+                    force_key: false,
                 })
             }
             _ => Err(anyhow!("encoder type mismatch")),
@@ -239,6 +241,11 @@ impl EncoderApi for VpxEncoder {
     }
 
     fn disable(&self) {}
+
+    fn request_keyframe(&mut self) -> bool {
+        self.force_key = true;
+        true
+    }
 }
 
 impl VpxEncoder {
@@ -263,12 +270,17 @@ impl VpxEncoder {
             data.as_ptr() as _,
         ));
 
+        let flags = if std::mem::take(&mut self.force_key) {
+            VPX_EFLAG_FORCE_KF
+        } else {
+            0
+        };
         call_vpx!(vpx_codec_encode(
             &mut self.ctx,
             &image,
             pts as _,
             1, // Duration
-            0, // Flags
+            flags as _,
             VPX_DL_REALTIME as _,
         ));
 
@@ -606,3 +618,42 @@ impl Drop for Image {
 }
 
 unsafe impl Send for vpx_codec_ctx_t {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_requested_key_frame_comes_with_the_next_frame() {
+        let (width, height) = (320, 240);
+        let mut encoder = VpxEncoder::new(
+            crate::codec::EncoderCfg::VPX(VpxEncoderConfig {
+                width,
+                height,
+                quality: 1.0,
+                codec: VpxVideoCodecId::VP9,
+                keyframe_interval: None,
+            }),
+            false,
+        )
+        .unwrap();
+        let yuv = vec![128u8; (width * height * 3) as usize];
+        let mut key_frames = Vec::new();
+        for n in 0..12 {
+            if n == 8 {
+                assert!(encoder.request_keyframe());
+            }
+            let mut key = false;
+            for frame in encoder.encode(n, &yuv, STRIDE_ALIGN).unwrap() {
+                key |= frame.key;
+            }
+            for frame in encoder.flush().unwrap() {
+                key |= frame.key;
+            }
+            if key {
+                key_frames.push(n);
+            }
+        }
+        assert_eq!(key_frames, vec![0, 8]);
+    }
+}

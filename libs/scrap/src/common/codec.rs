@@ -80,6 +80,12 @@ pub trait EncoderApi {
     fn is_hardware(&self) -> bool;
 
     fn disable(&self);
+
+    /// Makes the next frame encoded a key frame, where the encoder can be asked to. False
+    /// where it cannot, and a key frame then takes a new encoder.
+    fn request_keyframe(&mut self) -> bool {
+        false
+    }
 }
 
 pub struct Encoder {
@@ -683,7 +689,14 @@ impl Decoder {
                 }
                 #[cfg(feature = "hwcodec")]
                 if let Some(decoder) = &mut self.h264_ram {
-                    return Decoder::handle_hwram_video_frame(decoder, h264s, rgb, &mut self.i420);
+                    return Decoder::handle_hwram_video_frame(
+                        decoder,
+                        h264s,
+                        rgb,
+                        &mut self.i420,
+                        _texture,
+                        _pixelbuffer,
+                    );
                 }
                 Err(anyhow!("don't support h264!"))
             }
@@ -697,7 +710,14 @@ impl Decoder {
                 }
                 #[cfg(feature = "hwcodec")]
                 if let Some(decoder) = &mut self.h265_ram {
-                    return Decoder::handle_hwram_video_frame(decoder, h265s, rgb, &mut self.i420);
+                    return Decoder::handle_hwram_video_frame(
+                        decoder,
+                        h265s,
+                        rgb,
+                        &mut self.i420,
+                        _texture,
+                        _pixelbuffer,
+                    );
                 }
                 Err(anyhow!("don't support h265!"))
             }
@@ -784,12 +804,26 @@ impl Decoder {
         frames: &EncodedVideoFrames,
         rgb: &mut ImageRgb,
         i420: &mut Vec<u8>,
+        _texture: &mut ImageTexture,
+        _pixelbuffer: &mut bool,
     ) -> ResultType<bool> {
         let mut ret = false;
         for h264 in frames.frames.iter() {
             for image in decoder.decode(&h264.data)? {
+                // Already on screen then, and there is no image for the caller to show.
+                #[cfg(target_os = "ios")]
+                if image.show_native() {
+                    (_texture.w, _texture.h) = image.size();
+                    *_pixelbuffer = false;
+                    ret = true;
+                    continue;
+                }
                 // TODO: just process the last frame
                 if image.to_fmt(rgb, i420).is_ok() {
+                    #[cfg(target_os = "ios")]
+                    {
+                        *_pixelbuffer = true;
+                    }
                     ret = true;
                 }
             }

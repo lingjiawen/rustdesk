@@ -5,12 +5,18 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
 import 'package:flutter_hbb/consts.dart';
+import 'package:flutter_hbb/mobile/widgets/background_keep_alive.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse_widgets.dart';
 import 'package:flutter_hbb/mobile/widgets/gesture_help.dart';
 import 'package:flutter_hbb/mobile/widgets/ime_text.dart';
+import 'package:flutter_hbb/mobile/widgets/phone_resolution.dart';
 import 'package:flutter_hbb/mobile/widgets/touch_gesture_engine.dart';
+import 'package:flutter_hbb/mobile/widgets/game_keys.dart';
+import 'package:flutter_hbb/mobile/widgets/session_key_bar.dart';
 import 'package:flutter_hbb/mobile/widgets/session_panel.dart';
+import 'package:flutter_hbb/mobile/widgets/session_recording.dart';
+import 'package:flutter_hbb/mobile/widgets/session_video_texture.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_keyboard_visibility/flutter_keyboard_visibility.dart';
 import 'package:flutter_svg/svg.dart';
@@ -111,6 +117,15 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   final FocusNode _mobileFocusNode = FocusNode();
   final FocusNode _physicalFocusNode = FocusNode();
   var _showEdit = false; // use soft keyboard
+  // iOS: the function-key pad is shown in place of the soft keyboard.
+  var _showFnPad = false;
+  late final _keySink = InputModelKeySink(gFFI);
+  late final _gameKeySink = InputModelGameKeySink(gFFI);
+  // The game keys laid over the screen, null while they are off.
+  GameKeyLayouts? _gameLayouts;
+  SessionRecordingWatcher? _recording;
+  SessionVideoTexture? _videoTexture;
+  final _keyAreaHeight = ValueNotifier<double>(0);
 
   Worker? _waylandKeyboardGateWorker;
   bool _waylandKeyboardGateInitialized = false;
@@ -154,6 +169,15 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     gFFI.chatModel
         .changeCurrentKey(MessageKey(widget.id, ChatModel.clientModeID));
     _blockableOverlayState.applyFfi(gFFI);
+    if (isIOS) _recording = SessionRecordingWatcher(gFFI);
+    if (isIOS) {
+      _videoTexture = SessionVideoTexture.forSession(gFFI);
+      BackgroundKeepAlive.sessionOpened();
+      gFFI.imageModel.addCallbackOnFirstImage((_) {
+        capSessionFpsToScreen(gFFI);
+        if (isPhoneResolutionEnabled()) applyPhoneResolution(gFFI);
+      });
+    }
     gFFI.imageModel.addCallbackOnFirstImage((String peerId) {
       gFFI.recordingModel
           .updateStatus(bind.sessionGetIsRecording(sessionId: gFFI.sessionId));
@@ -199,6 +223,12 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   @override
   Future<void> dispose() async {
     if (isIOS) _textController.removeListener(_onIOSTextValue);
+    _recording?.dispose();
+    _videoTexture?.dispose();
+    if (isIOS) {
+      BackgroundKeepAlive.sessionClosed();
+      _backgroundGuard.dispose();
+    }
     HardwareKeyboard.instance.removeHandler(_handleLocalKeyEvent);
     WidgetsBinding.instance.removeObserver(this);
     // Close the session up-front. `gFFI.close()` below only calls `sessionClose`
@@ -224,6 +254,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     await gFFI.invokeMethod("enable_soft_keyboard", true);
     _mobileFocusNode.dispose();
     _physicalFocusNode.dispose();
+    _keyAreaHeight.dispose();
     clearWaylandKeyboardPromptSuppressedForConnection(sessionId.toString());
     _waylandKeyboardGateWorker?.dispose();
     inputModel.keyboardInputAllowed = true;
@@ -252,10 +283,13 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   DateTime? _iosBackgroundSince;
 
+  final _backgroundGuard = SessionBackgroundGuard();
+
   /// iOS keeps the app alive for about 30 s in the background (see
-  /// SceneDelegate). Video is not decoded meanwhile. Back in time, a refresh
-  /// brings the picture up to date; later, the suspended connection is
-  /// replaced at once instead of waiting for it to time out.
+  /// SceneDelegate), or for as long as it stays there with the background
+  /// keep-alive on. Video is not decoded meanwhile. When the app was not
+  /// suspended for long, a refresh brings the picture up to date; otherwise
+  /// the connection is replaced at once instead of waiting for it to time out.
   void _onIOSLifecycleChanged(AppLifecycleState state) {
     switch (state) {
       case AppLifecycleState.hidden:
@@ -263,13 +297,14 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         if (_iosBackgroundSince != null) return;
         _iosBackgroundSince = DateTime.now();
         bind.mainSetAppInBackground(background: true);
+        _backgroundGuard.onBackground();
         break;
       case AppLifecycleState.resumed:
         final since = _iosBackgroundSince;
         if (since == null) return;
         _iosBackgroundSince = null;
         bind.mainSetAppInBackground(background: false);
-        if (DateTime.now().difference(since) > const Duration(seconds: 28)) {
+        if (_backgroundGuard.onForeground()) {
           gFFI.ffiModel.reconnect(
               gFFI.dialogManager, sessionId, widget.forceRelay ?? false);
         } else {
@@ -542,8 +577,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final keyboardIsVisible =
         keyboardVisibilityController.isVisible && _showEdit;
-    final showActionButton =
-        (!_showBar && !isIOS) || keyboardIsVisible || _showGestureHelp;
+    final showActionButton = isIOS
+        ? _showGestureHelp
+        : !_showBar || keyboardIsVisible || _showGestureHelp;
 
     return WillPopScope(
       onWillPop: () async {
@@ -667,8 +703,69 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     });
   }
 
+  void _hideSoftKeyboard() {
+    _showEdit = false;
+    gFFI.invokeMethod("enable_soft_keyboard", false);
+    _mobileFocusNode.unfocus();
+    _physicalFocusNode.requestFocus();
+  }
+
+  void _openSoftKeyboard() {
+    setState(() => _showFnPad = false);
+    openKeyboard();
+  }
+
+  void _openFnPad() => setState(() {
+        _showFnPad = true;
+        _hideSoftKeyboard();
+      });
+
+  void _hideKeyArea() => setState(() {
+        _showFnPad = false;
+        _hideSoftKeyboard();
+      });
+
+  bool get _keyAreaOpen =>
+      _showFnPad || (keyboardVisibilityController.isVisible && _showEdit);
+
+  void _openSendText() {
+    // The sheet brings its own keyboard.
+    if (_keyAreaOpen) _hideKeyArea();
+    showSendTextSheet(context,
+        onSend: (text, enter) => sendTextToSession(gFFI, text, enter: enter));
+  }
+
+  Future<void> _typeClipboard() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text ?? '';
+    if (text.isEmpty) return;
+    await sendTextToSession(gFFI, text);
+  }
+
+  /// Keeps the canvas clear of the key area, the way the soft keyboard alone
+  /// does: the remote picture keeps its zoom and moves so the cursor stays
+  /// in view.
+  void _onKeyAreaLayout(double height, bool visible) {
+    final canvas = gFFI.canvasModel;
+    final resized = canvas.mobileKeyAreaHeight != height;
+    canvas.mobileKeyAreaHeight = height;
+    final wasVisible = gFFI.cursorModel.lastKeyboardIsVisible;
+    gFFI.cursorModel.keyHelpToolsVisibilityChanged(null, visible);
+    if (visible && wasVisible && resized) canvas.mobileFocusCanvasCursor();
+    if (resized) {
+      // This may run while the key area is building.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _keyAreaHeight.value = height;
+      });
+    }
+  }
+
   SessionPanelActions _panelActions() => SessionPanelActions(
-        openKeyboard: openKeyboard,
+        openKeyboard: _openSoftKeyboard,
+        openFnPad: _openFnPad,
+        sendText: _openSendText,
+        toggleKeyboard: () =>
+            _keyAreaOpen ? _hideKeyArea() : _openSoftKeyboard(),
         toggleTouchMode: () {
           gFFI.ffiModel.toggleTouchMode();
           bind.mainSetLocalOption(
@@ -683,7 +780,17 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         openChat: () => onPressedTextChat(widget.id),
         showDisplayOptions: () =>
             showOptions(context, widget.id, gFFI.dialogManager),
-        showMoreActions: () => showActions(widget.id),
+        controls: () => [
+          ..._getMobileActionMenus(),
+          ...toolbarControls(context, widget.id, gFFI),
+        ],
+        toggleGameKeys: () => setState(() {
+          _gameLayouts = _gameLayouts == null ? loadGameKeyLayouts() : null;
+        }),
+        isGameKeysShown: () => _gameLayouts != null,
+        toggleRecording: () => _recording?.toggle(),
+        isRecording: () => _recording?.since.value != null,
+        videoTexture: _videoTexture,
         disconnect: () => clientClose(sessionId, gFFI),
         isLandscapeLocked: () => _landscapeLocked,
         isBarShown: () => _showBar,
@@ -819,13 +926,18 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       !gFFI.canvasModel.cursorEmbedded &&
       !gFFI.inputModel.relativeMouseMode.value;
 
+  Widget _imagePaint(FfiModel ffiModel) => SessionVideoTextureLayer(
+      texture: _videoTexture,
+      ffiModel: ffiModel,
+      child: ImagePaint(ffiModel: ffiModel));
+
   Widget getBodyForMobile() {
     return Container(
         color: MyTheme.canvasColor,
         child: Stack(children: () {
           // Cursor moves and overlay updates should not repaint the frame.
           final image =
-              RepaintBoundary(child: ImagePaint(ffiModel: gFFI.ffiModel));
+              RepaintBoundary(child: _imagePaint(gFFI.ffiModel));
           final paints = [
             _useTouchEngine && !inputModel.isPhysicalMouse.value
                 ? Positioned.fill(
@@ -836,16 +948,41 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
               right: 10,
               child: QualityMonitor(gFFI.qualityMonitorModel),
             ),
-            Obx(() {
-              final chatKeyboardRequested =
-                  gFFI.chatModel.softKeyboardRequested.value;
-              // Repaints the modifier keys after a one-shot modifier is used.
-              gFFI.inputModel.touchModifiersChanged.value;
-              return KeyHelpTools(
-                  keyboardIsVisible: keyboardVisibilityController.isVisible &&
-                      (_showEdit || chatKeyboardRequested),
-                  showGestureHelp: _showGestureHelp);
-            }),
+            if (isIOS)
+              // Right above the soft keyboard, within reach of the thumbs.
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: Obx(() {
+                  // Repaints the modifier keys when one is switched or used.
+                  gFFI.inputModel.touchModifiersChanged.value;
+                  return SessionKeyArea(
+                    sink: _keySink,
+                    platform: gFFI.ffiModel.pi.platform,
+                    keyboardVisible:
+                        keyboardVisibilityController.isVisible && _showEdit,
+                    padShown: _showFnPad,
+                    onTogglePad: () =>
+                        _showFnPad ? _openSoftKeyboard() : _openFnPad(),
+                    onHide: _hideKeyArea,
+                    onSendText: _openSendText,
+                    onPasteClipboard: _typeClipboard,
+                    onLayout: _onKeyAreaLayout,
+                  );
+                }),
+              )
+            else
+              Obx(() {
+                final chatKeyboardRequested =
+                    gFFI.chatModel.softKeyboardRequested.value;
+                // Repaints the modifier keys after a one-shot modifier is used.
+                gFFI.inputModel.touchModifiersChanged.value;
+                return KeyHelpTools(
+                    keyboardIsVisible: keyboardVisibilityController.isVisible &&
+                        (_showEdit || chatKeyboardRequested),
+                    showGestureHelp: _showGestureHelp);
+              }),
             if (isIOS && _showEdit)
               // The text field is hidden, so show what the input method is
               // composing; nothing reaches the remote until it is committed.
@@ -923,9 +1060,46 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
               ffi: gFFI,
             ));
           }
+          final gameLayouts = _gameLayouts;
+          if (isIOS && gameLayouts != null && !_showGestureHelp) {
+            paints.add(Positioned.fill(
+              child: ValueListenableBuilder<double>(
+                valueListenable: _keyAreaHeight,
+                builder: (_, reserved, __) => GameKeysOverlay(
+                    sink: _gameKeySink,
+                    layouts: gameLayouts,
+                    onChanged: (layouts) {
+                      _gameLayouts = layouts;
+                      saveGameKeyLayouts(layouts);
+                    },
+                    onClose: () => setState(() => _gameLayouts = null),
+                    lookSupported: gFFI.inputModel.isRelativeMouseModeSupported,
+                    bottomReserved: reserved),
+              ),
+            ));
+          }
+          final recording = _recording;
+          if (recording != null && !_showGestureHelp) {
+            paints.add(Positioned(
+              // Below the game keys' own buttons.
+              top: gameLayouts == null ? 6 : 46,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: SessionRecordingBadge(
+                    since: recording.since, onStop: recording.toggle),
+              ),
+            ));
+          }
           if (isIOS && !_showGestureHelp) {
-            paints.add(SessionFloatingBall(
-                ffi: gFFI, id: widget.id, actions: _panelActions()));
+            paints.add(ValueListenableBuilder<double>(
+              valueListenable: _keyAreaHeight,
+              builder: (_, reserved, __) => SessionFloatingBall(
+                  ffi: gFFI,
+                  id: widget.id,
+                  actions: _panelActions(),
+                  bottomReserved: reserved),
+            ));
           }
           return paints;
         }()));
@@ -933,7 +1107,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   Widget getBodyForDesktopWithListener() {
     final ffiModel = Provider.of<FfiModel>(context);
-    var paints = <Widget>[ImagePaint(ffiModel: ffiModel)];
+    var paints = <Widget>[_imagePaint(ffiModel)];
     if (showCursorPaint) {
       final cursor = bind.sessionGetToggleOptionSync(
           sessionId: sessionId, arg: 'show-remote-cursor');
@@ -1373,39 +1547,6 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
     Future.delayed(Duration(milliseconds: 500), () {
       _updateRect();
     });
-    if (isIOS) {
-      // One scrollable row keeps most of the screen above the keyboard for the
-      // remote picture.
-      final row = <Widget>[
-        ...modifiers,
-        ...more.where((w) => w is! SizedBox),
-        ...fn.where((w) => w is! SizedBox),
-        wrap('', () async {
-          final data = await Clipboard.getData(Clipboard.kTextPlain);
-          final text = data?.text ?? '';
-          if (text.isEmpty) return;
-          bind.sessionInputString(sessionId: gFFI.sessionId, value: text);
-        }, icon: Icons.content_paste_go),
-        wrap('', () => setState(() => _pin = !_pin),
-            active: _pin, icon: Icons.push_pin),
-      ];
-      return Container(
-          key: _key,
-          color: Color(0xCC000000),
-          padding: EdgeInsets.only(
-              top: _keyboardVisibilityController.isVisible ? 24 : 4,
-              bottom: 4),
-          child: SizedBox(
-            height: 40,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 6),
-              itemCount: row.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 4),
-              itemBuilder: (_, i) => row[i],
-            ),
-          ));
-    }
     return Container(
         key: _key,
         color: Color(0xAA000000),
@@ -1478,7 +1619,9 @@ class CursorPaint extends StatelessWidget {
       return Offstage();
     }
 
-    final minSize = 12.0;
+    // The cursor is the only sign of where a click will land when the finger
+    // works as a trackpad, and a desktop fitted to a phone shrinks it.
+    final minSize = isIOS && !ffiModel.touchMode ? 22.0 : 12.0;
     double mins =
         minSize / (image.width > image.height ? image.width : image.height);
     double factor = 1.0;

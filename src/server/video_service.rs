@@ -758,6 +758,8 @@ fn run(vs: VideoService) -> ResultType<()> {
         capture_height,
     );
     let (mut second_instant, mut send_counter) = (Instant::now(), 0);
+    let mut last_keyframe_refresh: Option<Instant> = None;
+    let mut keyframe_pending = false;
 
     while sp.ok() {
         #[cfg(windows)]
@@ -780,8 +782,29 @@ fn run(vs: VideoService) -> ResultType<()> {
             if vs.source.is_monitor() {
                 let _ = try_broadcast_display_changed(&sp, display_idx, &c, true);
             }
-            log::info!("switch to refresh");
-            bail!("SWITCH");
+            // What the viewer needs from a refresh is a key frame, and starting capture and
+            // the encoder over is a costly way to make one. Where the encoder can be asked,
+            // ask. A screenshot waits for a newly captured frame, and a second refresh soon
+            // after the first says the first did not help, as with a capturer that has
+            // stalled, so both still start over.
+            let insisted = last_keyframe_refresh
+                .map_or(false, |at| at.elapsed() < Duration::from_secs(5));
+            let screenshot_waiting = SCREENSHOTS
+                .lock()
+                .unwrap()
+                .contains_key(&(vs.source, display_idx));
+            if !insisted && !screenshot_waiting && !yuv.is_empty() && encoder.request_keyframe()
+            {
+                sp.set_option_bool(OPTION_REFRESH, false);
+                last_keyframe_refresh = Some(Instant::now());
+                // An unchanged screen is not encoded again by itself.
+                repeat_encode_counter = 0;
+                keyframe_pending = true;
+                log::info!("key frame on refresh");
+            } else {
+                log::info!("switch to refresh");
+                bail!("SWITCH");
+            }
         }
         if codec_format != Encoder::negotiated_codec() {
             log::info!(
@@ -832,6 +855,7 @@ fn run(vs: VideoService) -> ResultType<()> {
         let res = match c.frame(spf) {
             Ok(frame) => {
                 repeat_encode_counter = 0;
+                keyframe_pending = false;
                 if frame.valid() {
                     let screenshot_key = (vs.source, display_idx);
                     let screenshot = SCREENSHOTS.lock().unwrap().remove(&screenshot_key);
@@ -943,6 +967,27 @@ fn run(vs: VideoService) -> ResultType<()> {
                             // bail!("Wayland capturer none 100 times, try restart capture");
                         }
                     }
+                }
+                // The repeats below push the key frame through an encoder that has latency; one
+                // that has none is not fed an unchanged screen at all, so it is fed once here.
+                if keyframe_pending && encoder.latency_free() && yuv.len() > 0 {
+                    keyframe_pending = false;
+                    let send_conn_ids = handle_one_frame(
+                        display_idx,
+                        &sp,
+                        EncodeInput::YUV(&yuv),
+                        ms,
+                        &mut encoder,
+                        recorder.clone(),
+                        &mut encode_fail_counter,
+                        &mut first_frame,
+                        &mut encoder_warmed_up,
+                        capture_width,
+                        capture_height,
+                    )?
+                    .send_conn_ids;
+                    frame_controller.set_send(now, send_conn_ids);
+                    send_counter += 1;
                 }
                 if !encoder.latency_free() && yuv.len() > 0 {
                     // yun.len() > 0 means the frame is not texture.

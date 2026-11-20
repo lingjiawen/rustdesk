@@ -708,6 +708,19 @@ pub fn session_input_string(session_id: SessionID, value: String) {
     }
 }
 
+pub fn session_send_clipboard_text(text: String) {
+    use base::message_proto;
+    let mut clipboard = message_proto::Clipboard::new();
+    clipboard.compress = false;
+    clipboard.content = text.into_bytes().into();
+    clipboard.format = hbb_common::protobuf::EnumOrUnknown::new(message_proto::ClipboardFormat::Text);
+    let mut multi = message_proto::MultiClipboards::new();
+    multi.clipboards.push(clipboard);
+    let mut msg = message_proto::Message::new();
+    msg.set_multi_clipboards(multi);
+    crate::flutter::send_clipboard_msg(msg, false);
+}
+
 // chat_client_mode
 pub fn session_send_chat(session_id: SessionID, text: String) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {

@@ -545,6 +545,10 @@ class RustdeskImpl {
         () => js.context.callMethod('setByName', ['input_string', value]));
   }
 
+  Future<void> sessionSendClipboardText({required String text, dynamic hint}) {
+    return Future(() {});
+  }
+
   Future<void> sessionSendChat(
       {required UuidValue sessionId, required String text, dynamic hint}) {
     return Future(

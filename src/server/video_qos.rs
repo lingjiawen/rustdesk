@@ -712,6 +712,17 @@ impl VideoQoS {
                 }
                 min.max(BR_MIN_HIGH_RESOLUTION)
             }
+            // A custom quality at least as high as the best preset is asked for its
+            // sharpness like that preset, which only runs at the default frame rate.
+            Quality::Custom(ratio) if ratio >= BR_BEST => {
+                let mut min = ratio / 2.5;
+                if let Some(ratio_1mbps) = ratio_1mbps {
+                    if min > ratio_1mbps {
+                        min = ratio_1mbps;
+                    }
+                }
+                min.max(BR_MIN)
+            }
             Quality::Low | Quality::Custom(_) => BR_MIN_HIGH_RESOLUTION,
         }
     }
@@ -895,6 +906,17 @@ mod tests {
         }
         assert_eq!(qos.fps(), FPS);
         qos
+    }
+
+    #[test]
+    fn a_custom_quality_as_high_as_the_best_preset_keeps_a_bitrate_floor() {
+        let mut qos = VideoQoS::default();
+        qos.users.insert(1, UserData::default());
+        // Custom qualities come as percentages, 50 for the ratio 1.
+        qos.user_image_quality(1, 75 << 8);
+        assert_eq!(qos.min_ratio(), BR_BEST / 2.5);
+        qos.user_image_quality(1, 25 << 8);
+        assert_eq!(qos.min_ratio(), BR_MIN_HIGH_RESOLUTION);
     }
 
     #[test]

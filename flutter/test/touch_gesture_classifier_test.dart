@@ -218,10 +218,22 @@ void main() {
       expect(sink.actions, ['moveTo 50,80', 'click right']);
     });
 
-    test('a quick swipe scrolls instead of dragging', () {
+    test('a quick swipe scrolls what is under the finger, without a tap first',
+        () {
       c.pointerDown(1, const Offset(100, 300), clock.now);
       c.pointerMove(1, const Offset(100, 200), clock.advance(40));
+      c.pointerMove(1, const Offset(100, 190), clock.advance(20));
       c.pointerUp(1, const Offset(100, 180), clock.advance(20));
+      expect(sink.events.where((e) => !e.startsWith('hint')).toList(),
+          ['moveTo 100,300', 'scroll', 'scroll', 'scrollEnd']);
+    });
+
+    test('a swipe that starts off the remote screen leaves the cursor alone',
+        () {
+      sink.touchable = false;
+      c.pointerDown(1, const Offset(5, 300), clock.now);
+      c.pointerMove(1, const Offset(5, 200), clock.advance(40));
+      c.pointerUp(1, const Offset(5, 180), clock.advance(20));
       expect(sink.actions, ['scroll', 'scrollEnd']);
     });
 

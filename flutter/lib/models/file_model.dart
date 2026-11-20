@@ -6,6 +6,7 @@ import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
 import 'package:flutter_hbb/utils/download_paths.dart';
 import 'package:flutter_hbb/utils/event_loop.dart';
+import 'package:flutter_hbb/utils/ios_container_path.dart';
 import 'package:get/get.dart';
 import 'package:path/path.dart' as path;
 import 'package:flutter_hbb/web/dummy.dart'
@@ -1393,8 +1394,9 @@ class JobController {
       currJobId = JobController.jobID.next();
     }
 
+    if (isIOS) to = rebaseIosContainerPath(to, await bind.mainGetHomeDir());
     if (!isAutoStart) {
-      if (!(isDesktop || isWebDesktop)) {
+      if (!(isDesktop || isWebDesktop || isIOS)) {
         // Don't add to job table if not auto start on mobile.
         // Because mobile does not support job list view now.
         return;
